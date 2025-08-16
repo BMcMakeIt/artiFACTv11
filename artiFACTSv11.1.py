@@ -9,6 +9,7 @@ from PIL import Image, ImageTk
 import sqlite3
 import cv2
 import os
+import shutil
 import tempfile
 import threading
 import base64
@@ -672,6 +673,15 @@ COLORS = {
 
 DB_PATH = "collection_catalog.db"
 PHOTO_DIR = "photos"
+PHOTO_SLOTS = {
+    "vinyl": 4,
+    "card": 3,
+    "coin": 2,
+    "toy": 4,
+    "fossil": 4,
+    "shell": 4,
+    "mineral": 4,
+}
 
 # ---------- DB ----------
 
@@ -736,6 +746,9 @@ def upsert_item(name: str, category: str, photo_path: str) -> int:
 
 def save_item_full(name: str, category: str, photo_path: str, details: dict) -> int:
     item_id = upsert_item(name, category, photo_path)
+    details = details or {}
+    photo_meta = populate_photo_slots(item_id, category, name, details, photo_path)
+    details.update(photo_meta)
     if details:
         con = sqlite3.connect(DB_PATH)
         cur = con.cursor()
@@ -1000,14 +1013,16 @@ class LibraryWindow(tk.Toplevel):
         if not sel:
             return
         name = self.listbox.get(sel[0])
-
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("SELECT * FROM items WHERE name = ?", (name,))
         row = cur.fetchone()
         cols = [d[0] for d in cur.description]
-        conn.close()
-
+        item_id = None
+        category = ""
+        if row:
+            item_id = row[cols.index("id")]
+            category = row[cols.index("category")] or ""
         self.info_text.config(state='normal')
         self.info_text.delete(1.0, tk.END)
         if row:
@@ -1021,24 +1036,34 @@ class LibraryWindow(tk.Toplevel):
             self.info_text.insert(tk.END, "Item not found.")
         self.info_text.config(state='disabled')
 
-        folder = os.path.join(PHOTO_DIR, name.replace(' ', '_'))
+        detail_map = {}
+        if item_id is not None:
+            cur.execute("SELECT key, value FROM item_details WHERE item_id=?", (item_id,))
+            detail_map = {k: v for k, v in cur.fetchall()}
+        conn.close()
+
+        n = PHOTO_SLOTS.get(category.lower(), 4)
         paths = []
-        if os.path.exists(folder):
-            for f in os.listdir(folder):
-                if f.lower().endswith((".jpg", ".jpeg", ".png")):
-                    paths.append(os.path.join(folder, f))
+        for i in range(1, n+1):
+            p = detail_map.get(f"img{i}_path")
+            paths.append(p if p and os.path.exists(p) else None)
+
         self.image_canvas.delete('all')
         self.photo_refs.clear()
-        for i, p in enumerate(paths):
-            try:
-                im = Image.open(p)
-                im.thumbnail((300, 300), Image.Resampling.LANCZOS)
-                tk_im = ImageTk.PhotoImage(im)
-                self.image_canvas.create_image(
-                    16 + i*312, 10, anchor='nw', image=tk_im)
-                self.photo_refs.append(tk_im)
-            except Exception as e:
-                print('Failed to load', p, e)
+        for i in range(n):
+            x = 16 + i*312
+            p = paths[i]
+            if p:
+                try:
+                    im = Image.open(p)
+                    im.thumbnail((300, 300), Image.Resampling.LANCZOS)
+                    tk_im = ImageTk.PhotoImage(im)
+                    self.image_canvas.create_image(x, 10, anchor='nw', image=tk_im)
+                    self.photo_refs.append(tk_im)
+                except Exception:
+                    self.image_canvas.create_rectangle(x, 10, x+300, 310, outline='#555', fill='#222')
+            else:
+                self.image_canvas.create_rectangle(x, 10, x+300, 310, outline='#555', fill='#222')
         self.image_canvas.config(scrollregion=self.image_canvas.bbox('all'))
 
 
@@ -1086,6 +1111,110 @@ def ddg_image_search(term: str, max_results: int = 4):
         return out
     except Exception:
         return []
+
+
+def _download_image(url: str, dest_path: str) -> bool:
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        with open(dest_path, "wb") as f:
+            f.write(r.content)
+        return True
+    except Exception:
+        return False
+
+
+def populate_photo_slots(item_id: int, category: str, name: str, details: dict, uploaded: str) -> dict:
+    cat = (category or "").lower()
+    item_dir = os.path.join(PHOTO_DIR, cat, str(item_id))
+    os.makedirs(item_dir, exist_ok=True)
+    meta = {}
+
+    slot = 1
+
+    def _save(url: str):
+        nonlocal slot
+        if not url:
+            slot += 1
+            return
+        ext = os.path.splitext(url.split("?")[0])[1].lower()
+        if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+            ext = ".jpg"
+        dest = os.path.join(item_dir, f"img{slot}{ext}")
+        if _download_image(url, dest):
+            meta[f"img{slot}_path"] = dest
+            meta[f"img{slot}_src"] = url
+        slot += 1
+
+    # copy uploaded image for persistence
+    if uploaded and os.path.exists(uploaded):
+        up_ext = os.path.splitext(uploaded)[1] or ".jpg"
+        up_dest = os.path.join(item_dir, f"upload{up_ext}")
+        try:
+            shutil.copyfile(uploaded, up_dest)
+            meta["upload_path"] = up_dest
+        except Exception:
+            pass
+        if cat in {"toy", "fossil", "shell", "mineral"}:
+            dest_first = os.path.join(item_dir, f"img1{up_ext}")
+            try:
+                shutil.copyfile(uploaded, dest_first)
+                meta["img1_path"] = dest_first
+                meta["img1_src"] = "uploaded"
+            except Exception:
+                pass
+            slot = 2
+
+    q_name = name or ""
+
+    if cat == "vinyl":
+        rel_id = details.get("discogs_release_id") or ""
+        urls = []
+        if rel_id:
+            try:
+                rel = discogs_get_release(int(rel_id))
+                for im in (rel.get("images") or [])[:PHOTO_SLOTS.get("vinyl", 4)]:
+                    u = im.get("uri") or im.get("resource_url")
+                    if u:
+                        urls.append(u)
+            except Exception:
+                urls = []
+        if not urls:
+            album = details.get("release_title", "")
+            artist = details.get("artist", "")
+            queries = [f"{album} – {artist}"] + [artist] * 3
+            for q in queries:
+                q = q.strip()
+                res = ddg_image_search(_build_reference_query(cat, q), max_results=1) if q else []
+                urls.append(res[0][0] if res else "")
+        for u in urls[:PHOTO_SLOTS.get("vinyl", 4)]:
+            _save(u)
+    elif cat == "card":
+        queries = [q_name, q_name, details.get("card_title", "")]
+        for q in queries:
+            q = q.strip()
+            res = ddg_image_search(_build_reference_query(cat, q), max_results=1) if q else []
+            _save(res[0][0] if res else "")
+    elif cat == "coin":
+        queries = [q_name, q_name]
+        for q in queries:
+            q = q.strip()
+            res = ddg_image_search(_build_reference_query(cat, q), max_results=1) if q else []
+            _save(res[0][0] if res else "")
+    elif cat == "toy":
+        queries = [q_name, details.get("character_model", ""), details.get("character_model", "")]
+        for q in queries:
+            q = q.strip()
+            res = ddg_image_search(_build_reference_query(cat, q), max_results=1) if q else []
+            _save(res[0][0] if res else "")
+    elif cat in {"fossil", "shell", "mineral"}:
+        queries = [q_name, q_name, q_name]
+        for q in queries:
+            q = q.strip()
+            res = ddg_image_search(_build_reference_query(cat, q), max_results=1) if q else []
+            _save(res[0][0] if res else "")
+
+    return meta
 
 # ---------- Detail Window ----------
 
