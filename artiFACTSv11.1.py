@@ -1,0 +1,1732 @@
+
+# artiFACTSv10.5a.py — pass-in-root pattern, tailored schemas only, scrollable details
+
+import re  # <— if not already present
+import openai_classifier_v1 as vc
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk
+import sqlite3
+import cv2
+import os
+import tempfile
+import threading
+import base64
+import json
+import io
+import webbrowser
+import requests
+
+
+# --- Discogs API helpers & pricing ---
+def _discogs_user_agent():
+    return "artiFACTS/1.0 (+local)"
+
+
+def _discogs_token():
+    return os.getenv("DISCOGS_TOKEN", "").strip()
+
+
+def discogs_search_release(artist: str = "", title: str = "", barcode: str = "", catno: str = "", per_page: int = 10):
+    tok = _discogs_token()
+    headers = {"User-Agent": _discogs_user_agent()}
+    params = {"type": "release", "per_page": per_page}
+    if tok: params["token"] = tok
+    q_parts = []
+    if artist: q_parts.append(artist)
+    if title:  q_parts.append(title)
+    if q_parts: params["q"] = " ".join(q_parts)
+    if barcode: params["barcode"] = barcode
+    if catno:   params["catno"] = catno
+    try:
+        r = requests.get("https://api.discogs.com/database/search",
+                         headers=headers, params=params, timeout=15)
+        r.raise_for_status()
+        return r.json().get("results", [])
+    except Exception:
+        return []
+
+
+def discogs_get_release(release_id: int):
+    tok = _discogs_token()
+    headers = {"User-Agent": _discogs_user_agent()}
+    params = {"token": tok} if tok else {}
+    try:
+        r = requests.get(
+            f"https://api.discogs.com/releases/{release_id}", headers=headers, params=params, timeout=15)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except Exception:
+        return None
+
+
+def discogs_price_suggestions(release_id: int):
+    tok = _discogs_token()
+    headers = {"User-Agent": _discogs_user_agent()}
+    params = {"token": tok} if tok else {}
+    try:
+        r = requests.get(
+            f"https://api.discogs.com/marketplace/price_suggestions/{release_id}", headers=headers, params=params, timeout=15)
+        if r.status_code != 200:
+            return {}
+        return r.json() or {}
+    except Exception:
+        return {}
+
+
+def discogs_release_stats(release_id: int, currency: str = "USD"):
+    tok = _discogs_token()
+    headers = {"User-Agent": _discogs_user_agent()}
+    params = {"token": tok, "curr_abbr": currency} if tok else {
+        "curr_abbr": currency}
+    try:
+        r = requests.get(
+            f"https://api.discogs.com/marketplace/stats/{release_id}", headers=headers, params=params, timeout=15)
+        if r.status_code != 200:
+            return {}
+        return r.json() or {}
+    except Exception:
+        return {}
+
+
+def _pick_best_discogs_match(results, artist="", title=""):
+    if not results: return None
+    artist_l = (artist or "").strip().lower()
+    title_l = (title or "").strip().lower()
+
+    def score(it):
+        s = 0
+        t = (it.get("title") or "").lower()
+        if artist_l and artist_l in t: s += 2
+        if title_l and title_l in t: s += 2
+        if it.get("type") == "release": s += 1
+        return s
+    return max(results, key=score)
+
+
+def _discogs_format_fields(release: dict):
+    fmt_list = release.get("formats") or []
+    format_tokens, size, rpm, weight_grams, color = [], "", "", "", ""
+    for f in fmt_list:
+        name = f.get("name")
+        descs = f.get("descriptions") or []
+        if name: format_tokens.append(name)
+        for d in descs:
+            format_tokens.append(d)
+            dl = str(d).lower()
+            if "rpm" in dl and not rpm: rpm = d
+            if "gram" in dl and not weight_grams: weight_grams = d
+            if any(c in dl for c in ["black", "color", "coloured", "colored", "marbled", "splatter", "pink", "blue", "red", "green", "white", "clear", "silver", "gold", "orange", "purple"]):
+                if not color: color = d
+            if '"' in d and not size: size = d
+    format_joined = ", ".join(dict.fromkeys([t for t in format_tokens if t]))
+    return format_joined, size, rpm, weight_grams, color
+
+
+def _parse_duration_to_seconds(s: str) -> int:
+    s = (s or "").strip()
+    if not s: return 0
+    parts = [p for p in s.split(":") if p.isdigit()]
+    if not parts: return 0
+    parts = list(map(int, parts))
+    if len(parts) == 3:
+        h, m, sec = parts
+        return h*3600 + m*60 + sec
+    if len(parts) == 2:
+        m, sec = parts
+        return m*60 + sec
+    if len(parts) == 1:
+        return parts[0]
+    return 0
+
+
+def _fmt_seconds(secs: int) -> str:
+    if secs <= 0: return ""
+    m, s = divmod(secs, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def map_discogs_release_to_schema(release: dict) -> dict:
+    if not release: return {}
+    labels = release.get("labels") or []
+    label_names = [l.get("name") for l in labels if l.get("name")]
+    label = label_names[0] if label_names else ""
+    tracks = release.get("tracklist") or []
+    tot_secs, parts = 0, []
+    for i, tr in enumerate(tracks):
+        title = (tr.get("title") or "").strip()
+        pos = (tr.get("position") or "").strip() or str(i+1)
+        dur = (tr.get("duration") or "").strip()
+        sec = _parse_duration_to_seconds(dur)
+        tot_secs += sec
+        if title:
+            seg = f"{pos} {title}"
+            if dur: seg += f" — {dur}"
+            parts.append(seg)
+    tracklist = "; ".join(parts)
+    genres = "; ".join(release.get("genres") or [])
+    styles = "; ".join(release.get("styles") or [])
+    fmt, size, rpm, weight_grams, color = _discogs_format_fields(release)
+    contributors = []
+    for a in (release.get("extraartists") or []):
+        nm = a.get("name"); role = a.get("role")
+        if nm and role: contributors.append(f"{nm} — {role}")
+    out = {
+        "artist":       "; ".join(a.get("name") for a in (release.get("artists") or []) if a.get("name")) or "",
+        "release_title": release.get("title", "") or "",
+        "label":         label,
+        "labels_all":    "; ".join(dict.fromkeys(label_names)) if label_names else "",
+        "country":       release.get("country", "") or "",
+        "release_year":  str(release.get("year") or ""),
+        "genres":        genres,
+        "styles":        styles,
+        "tracklist":     tracklist,
+        "total_runtime": _fmt_seconds(tot_secs),
+        "format":        fmt,
+        "size":          size,
+        "rpm":           rpm,
+        "weight_grams":  weight_grams,
+        "color":         color,
+        "pressing_plant": "",
+        "edition_notes":  (release.get("notes") or "").strip(),
+        "contributors_primary": "; ".join(contributors[:10]),
+        "discogs_release_id": str(release.get("id") or ""),
+        "discogs_url": release.get("uri") or "",
+        "discogs_median_price_usd": "",
+        "discogs_low_high_usd": "",
+        "description": "",
+        "fact": "",
+    }
+    for c in (release.get("companies") or []):
+        role = (c.get("entity_type_name") or c.get("role") or "").lower()
+        if "pressed" in role and c.get("name"):
+            out["pressing_plant"] = c["name"]
+            break
+    return out
+
+
+def merge_gpt_and_discogs(gpt: dict, discogs: dict) -> dict:
+    gpt = gpt or {}
+    if not discogs: return gpt
+    merged = dict(gpt)
+    prefer = ["artist", "release_title", "label", "labels_all", "country", "release_year",
+              "genres", "styles", "tracklist", "total_runtime", "format", "size", "rpm", "weight_grams", "color",
+              "pressing_plant", "edition_notes", "contributors_primary",
+              "discogs_release_id", "discogs_url"]
+    for k in prefer:
+        if discogs.get(k):
+            merged[k] = discogs[k]
+    return merged
+
+
+def choose_discogs_release(results: list) -> int:
+    try:
+        import tkinter as _tk
+    except Exception:
+        best = _pick_best_discogs_match(results) if results else None
+        return int(best.get("id")) if best and best.get("id") else 0
+    rows = []
+    for it in results[:3]:
+        rid = it.get("id")
+        title = it.get("title", "")
+        year = it.get("year", "")
+        label = it.get("label", "") or ", ".join(
+            it.get("label", []) if isinstance(it.get("label"), list) else [])
+        catno = it.get("catno", "")
+        country = it.get("country", "")
+        fmt = ", ".join(it.get("format", [])) if isinstance(
+            it.get("format"), list) else (it.get("format", "") or "")
+        rows.append(
+            (rid, f"{title} • {year} • {label} • {catno} • {country} • {fmt}"))
+    root = _tk._default_root or _tk.Tk()
+    win = _tk.Toplevel(root)
+    win.title("Choose release")
+    win.configure(bg=COLORS.get('bg_panel', '#111827'))
+    _tk.Label(win, text="Select the correct release:", bg=COLORS.get('bg_panel', '#111827'),
+              fg=COLORS.get('fg_primary', '#e5e7eb')).pack(padx=10, pady=8, anchor='w')
+    lb = _tk.Listbox(win)
+    lb.pack(fill='both', expand=True, padx=10, pady=6)
+    for _, desc in rows:
+        lb.insert(_tk.END, desc)
+    choice = {"rid": 0}
+
+    def _ok():
+        idx = lb.curselection()
+        if idx:
+            choice["rid"] = int(rows[idx[0]][0] or 0)
+        win.destroy()
+
+    def _cancel():
+        choice["rid"] = 0
+        win.destroy()
+    btns = _tk.Frame(win, bg=COLORS.get('bg_panel', '#111827'))
+    btns.pack(fill='x', padx=10, pady=8)
+    _tk.Button(btns, text="OK", command=_ok).pack(side='left')
+    _tk.Button(btns, text="Cancel", command=_cancel).pack(side='left', padx=6)
+    win.transient(root); win.grab_set(); root.wait_window(win)
+    return choice["rid"]
+
+
+DEBUG_ENRICH = True
+
+
+def _norm_key(k: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '', (k or '').lower())
+
+
+def _value_to_str(v):
+    if isinstance(v, list):
+        return ", ".join(map(str, v))
+    if isinstance(v, dict):
+        return json.dumps(v, separators=(",", ":"))
+    return "" if v is None else str(v).strip()
+
+
+# Aliases across categories so we accept minor variants the model emits
+
+# Aliases across categories so we accept minor variants the model emits
+ALIASES = {
+    "artist": ("primary artist", "main artist"),
+    "release_title": ("title", "album title", "release"),
+    "labels_all": ("labels", "label(s)", "record label"),
+    "release_year": ("year", "released", "release date"),
+    "genres": ("genre",),
+    "styles": ("style",),
+    "tracklist": ("tracks", "track list"),
+    "total_runtime": ("runtime", "duration", "total run time"),
+    "format": ("media format", "format type"),
+    "size": ("record size", "disc size"),
+    "rpm": ("speed", "play speed"),
+    "weight_grams": ("weight", "vinyl weight"),
+    "color": ("colour", "vinyl color"),
+    "pressing_plant": ("plant", "pressing plant"),
+    "edition_notes": ("edition", "edition notes"),
+    "contributors_primary": ("credits", "contributors"),
+    "discogs_median_price_usd": ("median price usd", "discogs median price"),
+    "discogs_low_high_usd": ("low high usd", "price range usd"),
+    "description": ("desc",),
+    "fact": ("fun fact", "trivia"),
+
+    # natural items
+    "scientific_name": ("scientific name", "species", "latin name", "binomial name"),
+    "subcategory":     ("sub category", "sub-type", "type", "group", "family"),
+    "material":        ("materials", "composition", "made of", "material type"),
+    "common_uses":     ("common uses", "uses", "typical uses", "applications", "function"),
+    "toxicity_safety": ("toxicity safety", "toxicity", "safety", "hazards", "handling"),
+
+    # vinyl
+    "release_title": ("title", "album title", "release"),
+    "labels_all":    ("labels", "label(s)"),
+    "release_year":  ("year", "released"),
+    "total_runtime": ("runtime", "duration"),
+    "pressing_plant": ("plant", "pressing plant"),
+    "contributors_primary": ("credits", "contributors"),
+    "discogs_median_price_usd": ("median price usd", "discogs median price"),
+    "discogs_low_high_usd":    ("low high usd", "price range usd"),
+
+    # toy
+    "toy_line_series": ("line", "series", "toy line", "line_or_series"),
+    "character_model": ("character", "model", "character/model"),
+    "product_code_sku": ("sku", "upc", "product code", "product_code"),
+    "articulation_points": ("articulation", "points of articulation"),
+    "accessories_included": ("accessories", "included accessories"),
+    "packaging_type": ("packaging", "package", "box type"),
+    "packaging_variants": ("packaging variants", "variant packaging"),
+    "original_msrp": ("msrp", "original price"),
+    "priceguide_median_usd": ("median price usd", "price guide median"),
+    "priceguide_low_high_usd": ("low high usd", "price guide range"),
+}
+
+
+def map_llm_json_to_keys(parsed: dict, key_list: list) -> dict:
+    normed = {}
+    if isinstance(parsed, dict):
+        for kk, vv in parsed.items():
+            normed[_norm_key(kk)] = vv
+
+    out = {}
+    for k in key_list:
+        cands = (k,) + ALIASES.get(k, ())
+        val = ""
+        for c in cands:
+            v = normed.get(_norm_key(c))
+            if v not in (None, "", [], {}):
+                val = _value_to_str(v)
+                break
+        out[k] = val
+    return out
+
+# --- OpenAI client (uses your existing _openai_client) ---
+
+
+def _img_to_data_url(path: str) -> str:
+    try:
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        ext = (os.path.splitext(path)[1] or ".jpg").lower().replace(".", "")
+        if ext not in ("jpg", "jpeg", "png", "webp"):
+            ext = "jpg"
+        return f"data:image/{ext};base64,{b64}"
+    except Exception:
+        return ""
+
+
+def enrich_generic_openai(name: str, category: str, photo_path: str, helpers: dict, key_list: list) -> dict:
+    client = _openai_client()
+
+    data_url = _img_to_data_url(photo_path) if photo_path else ""
+    provenance = helpers.get("provenance", "").strip()
+    date_hint = helpers.get("collected_date", "").strip()
+
+    # strict key template for the model to fill
+    keys_json = "{" + ",".join([f'"{k}":""' for k in key_list]) + "}"
+
+    system = (
+        "You are a master cataloger and professional archivist. "
+        "Assume the role of a renowned domain expert for the given category: "
+        "minerals/shells/fossils → experienced field geologist and museum registrar; "
+        "vinyl → Discogs-grade metadata editor and record store buyer; "
+        "cards/coins → PSA/NGC-style grader with auction catalog experience. "
+        "Your job: produce strictly structured, accurate catalog metadata. "
+        "Never invent facts—leave the field blank if uncertain. "
+        "Return ONLY minified JSON with exactly the provided keys."
+    )
+
+    guidance = ""
+    if category.lower() == "shell":
+        guidance = (
+            "\nField guidance for shells:"
+            "\n- subcategory = common group (e.g., whelk, conch, cowrie, scallop, cone, murex, tulip)."
+            "\n- material = 'calcium carbonate (aragonite)' unless a known exception applies."
+            "\n- common_uses = short list like 'decorative, jewelry, teaching specimens'."
+            "\n- toxicity_safety = 'non-toxic' unless a specific hazard is known."
+        )
+
+    user_text = (
+        f"Item category: {category}\n"
+        f"Label/name: {name}\n"
+        f"Provenance: {provenance}\n"
+        f"Collected/Purchase date: {date_hint}\n\n"
+        f"Return JSON with these keys exactly:\n{keys_json}\n"
+        "- Use plain strings; units OK; no markdown.\n"
+        "- If uncertain, use empty string."
+        f"{guidance}"
+    )
+
+    content = [{"type": "input_text", "text": user_text}]
+    if data_url:
+        content.append({"type": "input_image", "image_url": data_url})
+
+    resp = _openai_client().responses.create(
+        model="gpt-4o-mini",
+        input=[
+            {"role": "system", "content": [
+                {"type": "input_text", "text": system}]},
+            {"role": "user", "content": content}
+        ],
+        temperature=0.2, max_output_tokens=700
+    )
+
+    text = getattr(resp, "output_text", "").strip()
+    # robust parse
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        s, e = text.find("{"), text.rfind("}")
+        parsed = json.loads(text[s:e+1]) if (s != -
+                                             1 and e != -1 and e > s) else {}
+
+    out = map_llm_json_to_keys(parsed, key_list)
+
+    # Shell heuristics/fallbacks
+    if category.lower() == "shell":
+        def _guess_shell_subcategory(nm: str) -> str:
+            nm = (nm or "").lower()
+            for kw in ("whelk", "conch", "cowrie", "scallop", "cone", "murex", "tulip", "abalone", "cockle", "olive", "triton", "turban"):
+                if kw in nm:
+                    return kw
+            return ""
+        if not out.get("subcategory"):
+            out["subcategory"] = _guess_shell_subcategory(name)
+        if not out.get("material"):
+            out["material"] = "calcium carbonate (aragonite)"
+        if not out.get("toxicity_safety"):
+            out["toxicity_safety"] = "non-toxic"
+
+    return out
+
+
+def enrich_vinyl(name: str, photo_path: str, helpers: dict) -> dict:
+    client = _openai_client()
+    key_list = SCHEMAS["vinyl"]["api"]
+
+    runout_a = helpers.get("runout_deadwax_code_side_a", "").strip()
+    runout_b = helpers.get("runout_deadwax_code_side_b", "").strip()
+    user_barcode = (helpers.get("barcode_ean_upc") or "").strip()
+    keys_json = "{" + ",".join([f'"{k}":""' for k in key_list]) + "}"
+
+    system = (
+        "You are a Discogs-grade metadata editor and record buyer with deep catalog knowledge. "
+        "Act like a mastering engineer meets archivist: read labels, jackets, and runouts rigorously. "
+        "Avoid hallucinations; leave fields blank if unknown. "
+        "Return ONLY minified JSON using the exact keys provided."
+    )
+    guidance = (
+        "- tracklist as 'A1 …; A2 …; B1 …' is fine.\n"
+        "- If color/weight/rpm unknown, leave blank.\n"
+        "- If no price data, leave price fields blank."
+    )
+
+    user_text = (
+        f"Item category: vinyl\n"
+        f"Label/name on sleeve or user label: {name}\n"
+        f"Runout/deadwax A: {runout_a}\n"
+        f"Runout/deadwax B: {runout_b}\n\n"
+        f"Return JSON with these keys exactly:\n{keys_json}\n"
+        f"{guidance}"
+    )
+
+    content = [{"type": "input_text", "text": user_text}]
+    data_url = _img_to_data_url(photo_path) if photo_path else ""
+    if data_url:
+        content.append({"type": "input_image", "image_url": data_url})
+
+    resp = client.responses.create(
+        model="gpt-4o-mini",
+        input=[
+            {"role": "system", "content": [
+                {"type": "input_text", "text": system}]},
+            {"role": "user", "content": content}
+        ],
+        temperature=0.2, max_output_tokens=900
+    )
+
+    text = getattr(resp, "output_text", "").strip()
+    try:
+        gpt_parsed = json.loads(text)
+    except Exception:
+        s_idx, e_idx = text.find("{"), text.rfind("}")
+        gpt_parsed = json.loads(
+            text[s_idx:e_idx+1]) if (s_idx != -1 and e_idx != -1 and e_idx > s_idx) else {}
+
+    discogs_data = {}
+    release_id = 0
+    try:
+        artist_q = (helpers.get("artist") or "").strip() or (
+            gpt_parsed.get("artist") or "").strip()
+        title_q = (helpers.get("release_title") or "").strip() or (
+            gpt_parsed.get("release_title") or "").strip()
+        barcode_q = user_barcode or ((gpt_parsed.get("barcode_ean_upc") or "").split(
+            ";")[0].strip() if isinstance(gpt_parsed.get("barcode_ean_upc"), str) else "")
+        catno_q = (gpt_parsed.get("catalog_number") or "").strip() if isinstance(
+            gpt_parsed.get("catalog_number"), str) else ""
+
+        results = discogs_search_release(
+            artist=artist_q, title=title_q, barcode=barcode_q, catno=catno_q, per_page=10)
+        if results:
+            import threading
+            if len(results) > 1 and threading.current_thread() is threading.main_thread():
+                rid = choose_discogs_release(results[:3])
+            else:
+                rid = int(results[0].get("id") or 0)
+            if rid:
+                release_id = rid
+            else:
+                best = _pick_best_discogs_match(
+                    results, artist=artist_q, title=title_q)
+                release_id = int(best.get("id") or 0) if best else 0
+
+        if release_id:
+            release = discogs_get_release(release_id)
+            discogs_data = map_discogs_release_to_schema(
+                release) if release else {}
+
+            try:
+                sugg = discogs_price_suggestions(release_id) or {}
+                vgplus = sugg.get("Very Good Plus (VG+)") or sugg.get("VG+")
+                nm = sugg.get("Near Mint (NM or M-)") or sugg.get("NM or M-")
+                target = vgplus or nm
+                if target and isinstance(target, dict) and target.get("value"):
+                    discogs_data["discogs_median_price_usd"] = f"${float(target['value']):.2f}"
+                stats = discogs_release_stats(release_id, "USD") or {}
+                low = (stats.get("lowest_price") or {}).get("value")
+                high = (stats.get("highest_price") or {}).get("value") or None
+                if low:
+                    if high and float(high) >= float(low):
+                        discogs_data["discogs_low_high_usd"] = f"${float(low):.2f} - ${float(high):.2f}"
+                    else:
+                        discogs_data["discogs_low_high_usd"] = f"${float(low):.2f}+"
+            except Exception:
+                pass
+    except Exception:
+        discogs_data = {}
+
+    merged = merge_gpt_and_discogs(gpt_parsed, discogs_data)
+    if DEBUG_ENRICH:
+        print("== VINYL GPT parsed ==", gpt_parsed)
+        print("== VINYL Discogs data ==", discogs_data)
+        print("== VINYL merged ==", merged)
+    return map_llm_json_to_keys(merged, key_list)
+
+
+def enrich_toy(name: str, helpers: dict, photo_path: str = "") -> dict:
+    client = _openai_client()
+    key_list = SCHEMAS["toy"]["api"]
+
+    sku = helpers.get("sku_upc", "").strip()
+    user_brand = helpers.get("brand", "").strip()
+    user_line = helpers.get("toy_line_series", "").strip()
+    user_char = helpers.get("character_model", "").strip()
+    keys_json = "{" + ",".join([f'"{k}":""' for k in key_list]) + "}"
+
+    system = (
+        "You are a master cataloger and professional archivist specializing in collectible toys and action figures, "
+        "with the rigor of a museum registrar and the product literacy of a Hasbro/Kenner line manager. "
+        "Assess images and text to infer structured fields. "
+        "Be precise, avoid hallucinations, and leave unknown fields blank. "
+        "Return ONLY minified JSON using the exact keys provided."
+    )
+    guidance = (
+        "- articulation_points = integer if known.\n"
+        "- dimensions_mm / weight_grams: approximate if clearly known; else blank.\n"
+        "- packaging_type e.g. 'carded blister', 'window box', 'closed box'.\n"
+        "- price fields are USD; leave blank if unknown."
+    )
+
+    user_text = (
+        f"Item category: toy\n"
+        f"Label/name: {name}\n"
+        f"Hints — brand: {user_brand}; line/series: {user_line}; character/model: {user_char}; SKU/UPC: {sku}\n\n"
+        f"Return JSON with these keys exactly:\n{keys_json}\n"
+        f"{guidance}"
+    )
+
+    resp = client.responses.create(
+        model="gpt-4o-mini",
+        input=[
+            {"role": "system", "content": [
+                {"type": "input_text", "text": system}]},
+            {"role": "user", "content": [
+                {"type": "input_text", "text": user_text}]}
+        ],
+        temperature=0.2, max_output_tokens=800
+    )
+
+    text = getattr(resp, "output_text", "").strip()
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        s, e = text.find("{"), text.rfind("}")
+        parsed = json.loads(text[s:e+1]) if (s != -
+                                             1 and e != -1 and e > s) else {}
+
+    return map_llm_json_to_keys(parsed, key_list)
+
+
+def enrich_coin(name: str, helpers: dict) -> dict:
+    key_list = SCHEMAS["coin"]["api"]
+    # We don’t have the photo path here; pass empty string (fine for coins).
+    return enrich_generic_openai(name, "coin", "", helpers, key_list)
+
+
+def enrich_card(name: str, helpers: dict, photo_path: str = "") -> dict:
+    key_list = SCHEMAS["card"]["api"]
+    # If you want to send the image later, we can refactor collect_details to pass it.
+    return enrich_generic_openai(name, "card", photo_path, helpers, key_list)
+
+
+# Your image classifier module (unchanged)
+
+# --- OpenAI client
+try:
+    from openai import OpenAI
+    _OPENAI_OK = True
+except Exception:
+    _OPENAI_OK = False
+
+
+def _openai_client():
+    if not _OPENAI_OK:
+        raise RuntimeError("Missing dependency: pip install openai>=1.40")
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("Set OPENAI_API_KEY environment variable")
+    return OpenAI(api_key=api_key)
+
+
+COLORS = {
+    'bg_app':      '#0f172a',
+    'bg_panel':    '#111827',
+    'bg_card':     '#111827',
+    'fg_primary':  '#e5e7eb',
+    'fg_muted':    '#9ca3af',
+    'accent_a':    '#22d3ee',
+    'accent_b':    '#a78bfa',
+    'accent_warn': '#f59e0b',
+    'border':      '#1f2937',
+}
+
+DB_PATH = "collection_catalog.db"
+PHOTO_DIR = "photos"
+
+# ---------- DB ----------
+
+
+def _ensure_tables():
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS items (
+        id INTEGER PRIMARY KEY,
+        name TEXT UNIQUE,
+        category TEXT,
+        subcategory TEXT,
+        description TEXT,
+        fact TEXT,
+        found_date TEXT,
+        found_location TEXT,
+        estimated_age TEXT,
+        material TEXT,
+        display_case TEXT,
+        notes TEXT,
+        photo_path TEXT,
+        added_on DATETIME DEFAULT CURRENT_TIMESTAMP,
+        scientific_name TEXT,
+        region TEXT,
+        era_or_epoch TEXT,
+        common_uses TEXT,
+        toxicity_safety TEXT
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS item_details (
+        id INTEGER PRIMARY KEY,
+        item_id INTEGER NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT,
+        UNIQUE(item_id, key),
+        FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
+    )""")
+    con.commit()
+    con.close()
+
+
+_ensure_tables()
+
+
+def upsert_item(name: str, category: str, photo_path: str) -> int:
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "SELECT id FROM items WHERE lower(name)=lower(?) LIMIT 1", (name,))
+    row = cur.fetchone()
+    if row:
+        item_id = row[0]
+        cur.execute("UPDATE items SET category=?, photo_path=? WHERE id=?",
+                    (category, photo_path, item_id))
+    else:
+        cur.execute("INSERT INTO items(name, category, photo_path) VALUES (?,?,?)",
+                    (name, category, photo_path))
+        item_id = cur.lastrowid
+    con.commit()
+    con.close()
+    return item_id
+
+
+def save_item_full(name: str, category: str, photo_path: str, details: dict) -> int:
+    item_id = upsert_item(name, category, photo_path)
+    if details:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("PRAGMA table_info(items)")
+        cols = {r[1] for r in cur.fetchall()}
+        for k, v in details.items():
+            if not k:
+                continue
+            if k in cols:
+                cur.execute(f"UPDATE items SET {k}=? WHERE id=?", (str(
+                    v) if v is not None else "", item_id))
+            cur.execute("""INSERT INTO item_details(item_id, key, value)
+                           VALUES(?,?,?)
+                           ON CONFLICT(item_id, key) DO UPDATE SET value=excluded.value""",
+                        (item_id, k, str(v) if v is not None else ""))
+        con.commit()
+        con.close()
+    return item_id
+
+
+# ---------- Tailored per-category schemas ONLY ----------
+HIDDEN_META_KEYS = {"discogs_release_id", "discogs_url"}
+
+SCHEMAS = {
+    "mineral": {  # excludes region/era
+        "user": ["name", "collected_date", "provenance", "purchase_price", "storage_or_display_location", "notes"],
+        "api": [
+            "scientific_name", "mohs_hardness", "luster", "streak",
+            "cleavage_fracture", "habit_or_form", "specific_gravity", "formation_process",
+            "typical_colors", "common_uses", "toxicity_safety", "description", "fact"
+        ]
+    },
+    "shell": {
+        "user": ["name", "collected_date", "provenance", "purchase_price", "storage_or_display_location", "notes"],
+        "api": [
+            "scientific_name", "category", "subcategory", "material",
+            "common_uses", "toxicity_safety", "description", "fact"
+        ]
+    },
+    "fossil": {
+        "user": ["name", "collected_date", "provenance", "purchase_price", "storage_or_display_location", "notes"],
+        "api": [
+            "scientific_name", "geological_period", "estimated_age", "fossil_type", "preservation_mode",
+            "size_range", "typical_locations", "paleoecology", "toxicity_safety", "description", "fact"
+        ]
+    },
+    "toy": {
+        "user": ["name", "purchase_price", "storage_or_display_location", "notes", "sku_upc"],
+        "api": [
+            "brand", "manufacturer", "franchise_license", "toy_line_series", "character_model", "variant", "release_year", "scale", "dimensions_mm", "weight_grams", "materials", "articulation_points", "battery_type_required", "age_rating", "accessories_included", "packaging_type", "packaging_variants", "colorway", "original_msrp", "priceguide_median_usd", "priceguide_low_high_usd", "description", "fact"
+        ]
+    },
+    "vinyl": {
+        "user": ["name", "purchase_price", "storage_or_display_location", "notes",
+                 "runout_deadwax_code_side_a", "runout_deadwax_code_side_b", "barcode_ean_upc"],
+        "api": [
+            "artist", "release_title", "label", "labels_all", "country", "release_year", "genres", "styles", "tracklist", "total_runtime", "format", "size", "rpm", "weight_grams", "color", "pressing_plant", "edition_notes", "contributors_primary", "discogs_median_price_usd", "discogs_low_high_usd", "description", "fact", "discogs_release_id", "discogs_url"]
+    },
+    "coin": {
+        "user": ["name", "collected_date", "provenance", "purchase_price", "storage_or_display_location", "notes"],
+        "api": [
+            "country", "denomination", "year_minted", "mint_mark", "issuing_authority", "series_name", "coin_type", "catalog_numbers", "composition", "weight_grams", "diameter_mm", "thickness_mm", "shape", "edge_type", "obverse_design", "obverse_designer", "reverse_design", "reverse_designer", "orientation", "mintage", "mint_location", "minting_technique", "original_face_value", "current_melt_value_usd", "catalog_value_ranges", "auction_record_price_usd", "description", "fact"
+        ]
+    },
+    "card": {
+        "user": ["name", "purchase_price", "storage_or_display_location", "notes", "game_or_series", "set_name", "set_code", "card_number"],
+        "api": [
+            "game_or_series", "set_name", "set_code", "card_number", "card_title", "print_run_info", "release_year", "release_date_exact", "card_type", "rarity", "subtype_or_class", "holofoil_type", "variant_info", "dimensions_mm", "materials", "gameplay_text", "artist_or_photographer", "player_name", "team", "stats_or_gameplay_values", "original_pack_price_usd", "priceguide_median_usd", "priceguide_low_high_usd", "auction_record_price_usd", "description", "fact"
+        ]
+    },
+    "other": {
+        "user": ["name", "notes"],
+        "api": ["description", "fact"]
+    }
+}
+
+# ---------- UI helpers ----------
+
+
+class SlateFrame(tk.Frame):
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self.configure(bg=COLORS['bg_panel'], highlightthickness=1,
+                       highlightbackground=COLORS['border'], bd=0)
+
+
+class SlateLabel(tk.Label):
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self.configure(bg=COLORS['bg_panel'],
+                       fg=COLORS['fg_primary'], font=('Segoe UI', 11))
+
+
+class SlateTitle(tk.Label):
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self.configure(bg=COLORS['bg_panel'], fg=COLORS['fg_primary'],
+                       font=('Segoe UI Semibold', 14))
+
+
+class SlateButton(tk.Button):
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self.configure(bg=COLORS['accent_b'], fg='black', activebackground=COLORS['accent_a'], activeforeground='black',
+                       font=('Segoe UI Semibold', 10), relief='flat', bd=0, padx=14, pady=8, cursor='hand2',
+                       highlightthickness=1, highlightbackground=COLORS['border'])
+        self.bind('<Enter>', lambda e: self.configure(bg=COLORS['accent_a']))
+        self.bind('<Leave>', lambda e: self.configure(bg=COLORS['accent_b']))
+
+
+class SlateText(tk.Text):
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self.configure(bg=COLORS['bg_card'], fg=COLORS['fg_primary'], insertbackground=COLORS['accent_a'],
+                       selectbackground=COLORS['accent_b'], selectforeground='black',
+                       font=('Consolas', 10), relief='flat', wrap='word', padx=10, pady=10,
+                       highlightthickness=1, highlightbackground=COLORS['border'])
+
+
+class SlateListbox(tk.Listbox):
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self.configure(bg=COLORS['bg_card'], fg=COLORS['fg_primary'], selectbackground=COLORS['accent_a'],
+                       selectforeground='black', relief='flat', font=('Segoe UI', 10), highlightthickness=1,
+                       highlightbackground=COLORS['border'])
+
+
+class SlateCanvas(tk.Canvas):
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self.configure(bg=COLORS['bg_card'], relief='flat',
+                       highlightthickness=1, highlightbackground=COLORS['border'])
+
+
+def draw_banner(canvas: tk.Canvas, w: int, h: int):
+    canvas.delete('all')
+    step = 6
+    for i in range(0, h, step):
+        color = COLORS['accent_a'] if (
+            i // step) % 2 == 0 else COLORS['accent_b']
+        canvas.create_rectangle(0, i, w, i + step, fill=color, width=0)
+    canvas.create_rectangle(0, 0, w, h, fill='black',
+                            stipple='gray25', width=0)
+    title = "artiFACTS"
+    font_settings = ('Segoe UI Black', 44)
+    for radius, col in [(3, 'gray40'), (2, 'gray30'), (1, 'gray20')]:
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if dx*dx + dy*dy <= radius*radius:
+                    canvas.create_text(
+                        w // 2 + dx, h // 2 + dy, text=title, font=font_settings, fill=col)
+    canvas.create_text(w // 2, h // 2, text=title,
+                       font=font_settings, fill='white')
+
+# ScrollFrame for long forms
+
+
+class ScrollFrame(SlateFrame):
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self.canvas = tk.Canvas(
+            self, bg=COLORS['bg_panel'], highlightthickness=0)
+        self.vbar = tk.Scrollbar(
+            self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vbar.set)
+        self.inner = SlateFrame(self.canvas)
+        self.inner_id = self.canvas.create_window(
+            (0, 0), window=self.inner, anchor="nw")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.vbar.pack(side="right", fill="y")
+        self.inner.bind("<Configure>", self._on_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self._bind_mousewheel(self.canvas)
+
+    def _on_configure(self, event):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfigure(self.inner_id, width=event.width)
+
+    def _bind_mousewheel(self, widget):
+        widget.bind_all("<MouseWheel>", self._on_mousewheel)
+        widget.bind_all("<Button-4>", self._on_mousewheel_linux)
+        widget.bind_all("<Button-5>", self._on_mousewheel_linux)
+
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+    def _on_mousewheel_linux(self, event):
+        self.canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
+
+# ---------- Library Window ----------
+
+
+class LibraryWindow(tk.Toplevel):
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("artiFACTS Library")
+        self.configure(bg=COLORS['bg_app'])
+        try:
+            self.state('zoomed')
+        except tk.TclError:
+            self.attributes('-zoomed', True)
+
+        banner_frame = SlateFrame(self)
+        banner_frame.pack(fill=tk.X, padx=12, pady=(12, 6))
+        self.banner = tk.Canvas(banner_frame, height=64,
+                                bg=COLORS['bg_panel'], highlightthickness=0)
+        self.banner.pack(fill=tk.X)
+        self.banner.bind('<Configure>', lambda e: draw_banner(
+            self.banner, e.width, e.height))
+
+        main = SlateFrame(self)
+        main.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        left = SlateFrame(main)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+        SlateTitle(left, text='Item Catalog').pack(anchor='w', pady=(6, 4))
+        self.listbox = SlateListbox(left, width=40, height=28)
+        self.listbox.pack(fill=tk.Y, expand=True)
+        self.listbox.bind("<<ListboxSelect>>", self.display_item_info)
+
+        right = SlateFrame(main)
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        SlateTitle(right, text='Item Photos').pack(anchor='w', pady=(6, 6))
+
+        img_frame = SlateFrame(right)
+        img_frame.pack(fill=tk.X, pady=(0, 10))
+        self.image_canvas = SlateCanvas(img_frame, height=320)
+        self.image_canvas.pack(side='top', fill='x', expand=True)
+        sx = tk.Scrollbar(img_frame, orient='horizontal',
+                          command=self.image_canvas.xview)
+        sx.pack(side='bottom', fill='x')
+        self.image_canvas.configure(xscrollcommand=sx.set)
+        self.image_canvas.bind(
+            '<ButtonPress-1>', lambda e: self.image_canvas.scan_mark(e.x, e.y))
+        self.image_canvas.bind(
+            '<B1-Motion>', lambda e: self.image_canvas.scan_dragto(e.x, e.y, gain=1))
+
+        SlateTitle(right, text='Item Details').pack(anchor='w', pady=(6, 6))
+        details_wrap = SlateFrame(right)
+        details_wrap.pack(fill=tk.BOTH, expand=True)
+        self.info_text = SlateText(details_wrap, height=14)
+        self.info_text.pack(side='left', fill=tk.BOTH, expand=True)
+        info_scroll = tk.Scrollbar(
+            details_wrap, orient='vertical', command=self.info_text.yview)
+        info_scroll.pack(side='right', fill='y')
+        self.info_text.configure(yscrollcommand=info_scroll.set)
+
+        self.photo_refs = []
+        self.load_items()
+
+    def load_items(self):
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM items ORDER BY name")
+        for (name,) in cur.fetchall():
+            self.listbox.insert(tk.END, name)
+        conn.close()
+
+    def display_item_info(self, event):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        name = self.listbox.get(sel[0])
+
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM items WHERE name = ?", (name,))
+        row = cur.fetchone()
+        cols = [d[0] for d in cur.description]
+        conn.close()
+
+        self.info_text.config(state='normal')
+        self.info_text.delete(1.0, tk.END)
+        if row:
+            for i, val in enumerate(row):
+                if cols[i] in ("id", "added_on", "photo_path"):
+                    continue
+                if val:
+                    label = cols[i].replace('_', ' ').capitalize()
+                    self.info_text.insert(tk.END, f"• {label}: {val}\n\n")
+        else:
+            self.info_text.insert(tk.END, "Item not found.")
+        self.info_text.config(state='disabled')
+
+        folder = os.path.join(PHOTO_DIR, name.replace(' ', '_'))
+        paths = []
+        if os.path.exists(folder):
+            for f in os.listdir(folder):
+                if f.lower().endswith((".jpg", ".jpeg", ".png")):
+                    paths.append(os.path.join(folder, f))
+        self.image_canvas.delete('all')
+        self.photo_refs.clear()
+        for i, p in enumerate(paths):
+            try:
+                im = Image.open(p)
+                im.thumbnail((300, 300), Image.Resampling.LANCZOS)
+                tk_im = ImageTk.PhotoImage(im)
+                self.image_canvas.create_image(
+                    16 + i*312, 10, anchor='nw', image=tk_im)
+                self.photo_refs.append(tk_im)
+            except Exception as e:
+                print('Failed to load', p, e)
+        self.image_canvas.config(scrollregion=self.image_canvas.bbox('all'))
+
+
+# ---- DDG image search ----
+try:
+    from duckduckgo_search import DDGS
+    _DDG_OK = True
+except Exception:
+    _DDG_OK = False
+
+
+def _build_reference_query(category: str, term: str) -> str:
+    c = (category or "").lower().strip()
+    t = term.strip()
+    if c == "vinyl":
+        return f"{t} album cover front high resolution"
+    if c == "card":
+        return f"{t} trading card front"
+    if c == "coin":
+        return f"{t} coin obverse reverse"
+    if c == "toy":
+        return f"{t} vintage toy figure photo"
+    if c == "fossil":
+        return f"{t} fossil specimen"
+    if c == "shell":
+        return f"{t} seashell specimen"
+    if c == "mineral":
+        return f"{t} mineral specimen macro"
+    return t
+
+
+def ddg_image_search(term: str, max_results: int = 4):
+    if not _DDG_OK:
+        return []
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.images(
+                term, max_results=max_results, safesearch="moderate"))
+        out = []
+        for r in results:
+            img_url = r.get("image")
+            page_url = r.get("url")
+            if img_url and page_url:
+                out.append((img_url, page_url))
+        return out
+    except Exception:
+        return []
+
+# ---------- Detail Window ----------
+
+
+class ItemDetailWindow(tk.Toplevel):
+    def __init__(self, master, initial_name: str, category: str, photo_path: str):
+        super().__init__(master)
+        self.title("Item details")
+        self.configure(bg=COLORS['bg_app'])
+        self.minsize(900, 650)
+        self.category = category
+        self.photo_path = photo_path
+        self.details_entries = {}
+        self.meta_entries = {}
+
+        # Header
+        header = SlateFrame(self)
+        header.pack(fill=tk.X, padx=12, pady=(12, 0))
+        SlateTitle(header, text=f"Review & Save Item — {category.capitalize()}").pack(
+            anchor='w', pady=(4, 6))
+
+        # Photo
+        row_photo = SlateFrame(self)
+        row_photo.pack(fill=tk.X, padx=12, pady=8)
+        SlateLabel(row_photo, text="Photo").grid(
+            row=0, column=0, sticky='ne', padx=(8, 6))
+        img_box = SlateFrame(row_photo)
+        img_box.grid(row=0, column=1, sticky='w')
+        try:
+            im = Image.open(photo_path)
+            im.thumbnail((300, 300), Image.Resampling.LANCZOS)
+            self._tk_img = ImageTk.PhotoImage(im)
+            tk.Label(img_box, image=self._tk_img, bg=COLORS['bg_panel']).pack()
+        except Exception:
+            SlateLabel(img_box, text="(image unavailable)").pack()
+
+        # Scrollable fields
+        scroll = ScrollFrame(self)
+        scroll.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        body = scroll.inner
+
+        cols = SlateFrame(body)
+        cols.pack(fill=tk.BOTH, expand=True, pady=(8, 4))
+        left = SlateFrame(cols)
+        right = SlateFrame(cols)
+        left.pack(side='left', fill=tk.BOTH, expand=True, padx=(0, 6))
+        right.pack(side='left', fill=tk.BOTH, expand=True, padx=(6, 0))
+
+        SlateTitle(left, text="You enter").pack(
+            anchor='w', padx=8, pady=(6, 4))
+        self.user_frame = SlateFrame(left)
+        self.user_frame.pack(fill=tk.X, padx=6, pady=(0, 6))
+
+        SlateTitle(right, text="Auto from API").pack(
+            anchor='w', padx=8, pady=(6, 4))
+        self.api_frame = SlateFrame(right)
+        self.api_frame.pack(fill=tk.X, padx=6, pady=(0, 6))
+
+        schema = SCHEMAS.get(self.category.lower(), SCHEMAS["other"])
+        for k in schema["user"]:
+            self._add_field(self.user_frame, k, is_api=False)
+        for k in schema["api"]:
+            if k in HIDDEN_META_KEYS:
+                continue
+            self._add_field(self.api_frame, k, is_api=True)
+
+        if "name" in self.details_entries:
+            e = self.details_entries["name"]
+            e.delete(0, tk.END)
+            e.insert(0, initial_name)
+
+        # Pinned buttons
+        btns = SlateFrame(self)
+        btns.pack(fill=tk.X, padx=12, pady=(0, 12))
+        self.collect_btn = SlateButton(
+            btns, text="Collect Details", command=self.collect_details)
+        self.collect_btn.pack(side='left', padx=6)
+        SlateButton(btns, text="Save Item", command=self.save_item).pack(
+            side='left', padx=6)
+        SlateButton(btns, text="Cancel", command=self.destroy).pack(
+            side='left', padx=6)
+        self.status = SlateLabel(btns, text="")
+        self.status.pack(side='left', padx=12)
+
+    def _add_field(self, parent, key: str, is_api: bool):
+        row = SlateFrame(parent)
+        row.pack(fill=tk.X, pady=3)
+        row.grid_columnconfigure(1, weight=1)
+        label = key.replace("_", " ")
+        SlateLabel(row, text=label).grid(
+            row=0, column=0, sticky='e', padx=(8, 6))
+        var = tk.StringVar(value="")
+        e = tk.Entry(row, textvariable=var, bg=COLORS['bg_card'], fg=COLORS['fg_primary'],
+                     insertbackground=COLORS['accent_a'], relief='flat', font=('Segoe UI', 10))
+        e.grid(row=0, column=1, sticky='we')
+        (self.meta_entries if is_api else self.details_entries)[key] = e
+        if not is_api and key == "barcode_ean_upc":
+            try:
+                btn = SlateButton(row, text="Scan", command=self.scan_barcode)
+                btn.grid(row=0, column=2, padx=(6, 8))
+            except Exception:
+                pass
+
+
+
+def scan_barcode(self):
+        """Open camera and decode a UPC/EAN; writes to barcode_ean_upc. Threaded (no GUI freeze)."""
+        import tkinter as _tk, threading
+        try:
+            import cv2
+            from PIL import Image, ImageTk
+        except Exception:
+            messagebox.showinfo("Barcode scan", "Install deps: pip install opencv-python pillow pyzbar")
+            return
+        try:
+            from pyzbar.pyzbar import decode as _pz_decode
+        except Exception:
+            _pz_decode = None
+
+        def _digits(s): return "".join(ch for ch in (s or "") if ch.isdigit())
+        def _ean13_ok(s):
+            if len(s) != 13 or not s.isdigit(): return False
+            d = list(map(int, s)); chk = d[-1]
+            ss = 3*sum(d[0:12:2]) + sum(d[1:12:2])
+            return (10 - (ss % 10)) % 10 == chk
+        def _upc_ok(s):
+            if len(s) != 12 or not s.isdigit(): return False
+            d = list(map(int, s)); chk = d[-1]
+            ss = 3*sum(d[0:11:2]) + sum(d[1:11:2])
+            return (10 - (ss % 10)) % 10 == chk
+        def _normalize(code):
+            s = _digits(code)
+            if len(s) == 13 and s.startswith("0") and _ean13_ok(s):
+                t = s[1:]
+                if _upc_ok(t): return t
+            return s
+
+        def _decode_once(img, detector):
+            vals = set()
+            try:
+                res = detector.detectAndDecode(img) if detector is not None else ("", None, None)
+                a = res[0] if isinstance(res, tuple) else res
+                if isinstance(a, (list,tuple)):
+                    for v in a:
+                        if v: vals.add(_digits(v))
+                else:
+                    if a: vals.add(_digits(a))
+            except Exception:
+                pass
+            if _pz_decode is not None:
+                try:
+                    for d in _pz_decode(img):
+                        try: v = d.data.decode("utf-8", errors="ignore")
+                        except Exception: v = str(d.data)
+                        if v: vals.add(_digits(v))
+                except Exception:
+                    pass
+            vals = [v for v in vals if len(v) >= 8]
+            if not vals: return ""
+            vals.sort(key=lambda s: (1 if (_upc_ok(s) or _ean13_ok(s)) else 0, len(s)), reverse=True)
+            return vals[0]
+
+        def _heavy(img, detector):
+            import cv2
+            h, w = img.shape[:2]
+            for s in (1.0, 1.3, 1.6, 2.0, 2.5):
+                try: im = cv2.resize(img, (int(w*s), int(h*s)), interpolation=cv2.INTER_CUBIC) if s!=1.0 else img.copy()
+                except Exception: im = img.copy()
+                hh, ww = im.shape[:2]
+                for frac in (0.98, 0.92, 0.85, 0.75):
+                    cw, ch = int(ww*frac), int(hh*frac); cx, cy = (ww-cw)//2, (hh-ch)//2
+                    crop = im[cy:cy+ch, cx:cx+cw]
+                    for rot in (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
+                        try: r = cv2.rotate(crop, rot) if rot is not None else crop
+                        except Exception: r = crop
+                        try: gray = cv2.cvtColor(r, cv2.COLOR_BGR2GRAY)
+                        except Exception: gray = r
+                        for cand in (r, gray):
+                            code = _decode_once(cand, detector)
+                            if code: return code
+            return ""
+
+        win = _tk.Toplevel(self); win.title("Scan barcode"); win.configure(bg=COLORS['bg_panel']); win.transient(self); win.grab_set()
+        preview = _tk.Label(win, bg=COLORS['bg_panel']); preview.pack(padx=10, pady=(10,6))
+        status = _tk.Label(win, text="Align barcode in the box. Press Capture (or Space).", bg=COLORS['bg_panel'], fg=COLORS['fg_primary']); status.pack(padx=10, pady=(0,8))
+        btns = _tk.Frame(win, bg=COLORS['bg_panel']); btns.pack(padx=10, pady=(0,10))
+        cap_btn = SlateButton(btns, text="Capture"); cap_btn.pack(side='left', padx=6)
+        SlateButton(btns, text="Close", command=win.destroy).pack(side='left', padx=6)
+
+        import cv2
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW) if hasattr(cv2, "CAP_DSHOW") else cv2.VideoCapture(0)
+        if not cap or not cap.isOpened():
+            win.destroy(); messagebox.showerror("Barcode scanner", "No camera found."); return
+        try: cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080); cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+        except Exception: pass
+        try: detector = cv2.barcode.BarcodeDetector()
+        except Exception: detector = None
+
+        last = {"frame": None}; busy = {"flag": False}
+        def on_close():
+            try: cap.release()
+            except Exception: pass
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", on_close); win.bind("<Escape>", lambda e: on_close())
+
+        def commit(val):
+            s = _normalize(val)
+            e = self.details_entries.get("barcode_ean_upc")
+            if e: e.delete(0, tk.END); e.insert(0, s)
+            else: messagebox.showinfo("Barcode", s)
+            on_close()
+
+        def after(guess):
+            busy["flag"] = False
+            try: cap_btn.config(state="normal", text="Capture")
+            except Exception: pass
+            if guess: commit(guess)
+            else: status.config(text="No barcode found. Try again.")
+
+        def do_capture(event=None):
+            if busy["flag"]: return
+            frame = last["frame"]
+            if frame is None: return
+            busy["flag"] = True
+            try: cap_btn.config(state="disabled", text="Processing…")
+            except Exception: pass
+            status.config(text="Processing capture…"); win.update_idletasks()
+
+            img = frame.copy()
+            h, w = img.shape[:2]
+            rw, rh = int(w*0.96), int(h*0.55); rx, ry = (w-rw)//2, (h-rh)//2
+            roi = img[ry:ry+rh, rx:rx+rw].copy()
+
+            def worker():
+                try:
+                    for cand in (roi, img):
+                        code = _heavy(cand, detector)
+                        if code:
+                            self.after(0, lambda g=code: after(g)); return
+                    self.after(0, lambda: after(""))
+                except Exception:
+                    self.after(0, lambda: after(""))
+            threading.Thread(target=worker, daemon=True).start()
+
+        cap_btn.config(command=do_capture); win.bind("<space>", lambda e: do_capture())
+
+        def tick():
+            ok, frame = cap.read()
+            if not ok:
+                win.after(15, tick); return
+            last["frame"] = frame.copy()
+            h, w = frame.shape[:2]
+            rw, rh = int(w*0.96), int(h*0.55); rx, ry = (w-rw)//2, (h-rh)//2
+            cv2.rectangle(frame, (rx, ry), (rx+rw, ry+rh), (0,255,0), 2)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            im = Image.fromarray(frame_rgb)
+            maxw = 960
+            if w > maxw: im = im.resize((maxw, int(maxw*h/w)))
+            tk_img = ImageTk.PhotoImage(im)
+            preview.configure(image=tk_img); preview.image = tk_img
+            win.after(30, tick)
+
+        tick()
+
+
+def _gather_user_helpers(self) -> dict:
+        helpers = {}
+        for k, e in self.details_entries.items():
+            helpers[k] = e.get().strip()
+        for k, e in self.meta_entries.items():
+            v = e.get().strip()
+            if v:
+                helpers.setdefault(k, v)
+        return helpers
+
+    def _apply_details(self, meta: dict):
+        if not meta:
+            self.status.config(text="No enrichment found.")
+            return
+        filled = 0
+        for k, v in (meta or {}).items():
+            if k in self.meta_entries and v:
+                entry = self.meta_entries[k]
+                entry.delete(0, tk.END)
+                entry.insert(0, v)
+                filled += 1
+        self.status.config(text=("No confident fields returned." if filled ==
+                           0 else f"Details collected. {filled} field(s) populated."))
+
+    def collect_details(self):
+        alias_map = {'toys': 'toy', 'records': 'vinyl', 'record': 'vinyl',
+                     'shells': 'shell', 'minerals': 'mineral', 'fossils': 'fossil',
+                     'coins': 'coin', 'cards': 'card'}
+        self.collect_btn.config(state='disabled')
+        self.status.config(text="Collecting details…")
+        cat = alias_map.get((self.category or '').strip(
+        ).lower(), (self.category or '').strip().lower())
+        helpers = self._gather_user_helpers()
+        name_for_prompt = helpers.get("name", "").strip() or "(unnamed item)"
+        schema = SCHEMAS.get(cat, SCHEMAS["other"])
+        key_list = list(dict.fromkeys(schema['api']))
+
+        def _work():
+            meta, err = None, None
+            try:
+                if cat in ("mineral", "shell", "fossil"):
+                    meta = enrich_generic_openai(
+                        name_for_prompt, cat, self.photo_path, helpers, key_list)
+                elif cat == "vinyl":
+                    meta = enrich_vinyl(
+                        name_for_prompt, self.photo_path, helpers)
+                    try:
+                        self._last_meta_result = dict(meta)
+                    except Exception:
+                        self._last_meta_result = meta
+                elif cat == "toy":
+                    meta = enrich_toy(
+                        name_for_prompt, helpers, self.photo_path)
+                elif cat == "coin":
+                    meta = enrich_coin(name_for_prompt, helpers)
+                elif cat == "card":
+                    meta = enrich_card(
+                        name_for_prompt, helpers, self.photo_path)
+                else:
+                    meta = {}
+            except Exception as e:
+                err = str(e)
+
+            def _ui():
+                if err:
+                    messagebox.showerror("Enrichment error", err)
+                    self.status.config(text="Enrichment failed.")
+                else:
+                    self._apply_details(meta)
+                self.collect_btn.config(state='normal')
+            self.after(0, _ui)
+        threading.Thread(target=_work, daemon=True).start()
+
+    def save_item(self):
+        name = self.details_entries.get("name").get().strip(
+        ) if self.details_entries.get("name") else ""
+        if not name:
+            messagebox.showerror(
+                "Missing name", "Please enter a name before saving.")
+            return
+        details = {}
+        for k, e in self.details_entries.items():
+            v = e.get().strip()
+            if v:
+                details[k] = v
+        for k, e in self.meta_entries.items():
+            v = e.get().strip()
+            if v:
+                details[k] = v
+
+# Include hidden Discogs fields captured during enrichment
+try:
+    if hasattr(self, "_last_meta_result") and isinstance(self._last_meta_result, dict):
+        for hk in ("discogs_release_id","discogs_url","discogs_median_price_usd","discogs_low_high_usd"):
+            hv = self._last_meta_result.get(hk)
+            if hv and hk not in details:
+                details[hk] = str(hv)
+except Exception:
+    pass
+
+        try:
+            item_id = save_item_full(
+                name, self.category, self.photo_path, details)
+            messagebox.showinfo("Saved", f"Item saved (id {item_id}).")
+            self.destroy()
+        except Exception as e:
+            messagebox.showerror("DB error", str(e))
+
+# ---------- Classifier App (pass-in root) ----------
+
+
+class ClassifierApp:
+    def __init__(self, root: tk.Tk):
+        self.master = root
+        self.master.title('artiFACTS')
+        self.master.configure(bg=COLORS['bg_app'])
+        try:
+            self.master.state('zoomed')
+        except tk.TclError:
+            self.master.attributes('-zoomed', True)
+
+        banner_frame = SlateFrame(self.master)
+        banner_frame.pack(fill=tk.X, padx=12, pady=(12, 6))
+        self.banner = tk.Canvas(banner_frame, height=96,
+                                bg=COLORS['bg_panel'], highlightthickness=0)
+        self.banner.pack(fill=tk.X)
+        self.banner.bind('<Configure>', lambda e: draw_banner(
+            self.banner, e.width, e.height))
+
+        main = SlateFrame(self.master)
+        main.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        for r in (0, 1):
+            main.grid_rowconfigure(r, weight=1, uniform="rows")
+        for c in (0, 1):
+            main.grid_columnconfigure(c, weight=1, uniform="cols")
+
+        # Controls
+        tl = SlateFrame(main)
+        tl.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
+        SlateTitle(tl, text='Controls').grid(row=0, column=0,
+                                             columnspan=6, sticky='w', padx=8, pady=(8, 6))
+        SlateLabel(tl, text='Category').grid(
+            row=1, column=0, sticky='e', padx=(8, 4))
+        self.category_var = tk.StringVar(value='mineral')
+        self.category_combo = ttk.Combobox(
+            tl, textvariable=self.category_var, state='readonly',
+            values=list(SCHEMAS.keys()), width=14
+        )
+        self.category_combo.grid(
+            row=1, column=1, sticky='w', padx=(0, 12), pady=6)
+        SlateButton(tl, text='Select Image', command=self.select_image).grid(
+            row=1, column=2, padx=6)
+        SlateButton(tl, text='Capture Image', command=self.capture_image).grid(
+            row=1, column=3, padx=6)
+        SlateButton(tl, text='View Library', command=self.view_library).grid(
+            row=1, column=4, padx=6)
+
+        # Selected image
+        tr = SlateFrame(main)
+        tr.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 6))
+        SlateTitle(tr, text='Selected Image').pack(
+            anchor='w', padx=8, pady=(8, 6))
+        self.image_label = SlateLabel(
+            tr, text='No image selected', font=('Segoe UI', 11, 'italic'))
+        self.image_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
+
+        # Results
+        bl = SlateFrame(main)
+        bl.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(6, 0))
+        SlateTitle(bl, text='Classification Results').pack(
+            anchor='w', padx=8, pady=(8, 6))
+        actions = SlateFrame(bl)
+        actions.pack(fill=tk.X, padx=8, pady=(0, 6))
+        SlateLabel(actions, text="Choose result:").grid(
+            row=0, column=0, padx=(8, 6), pady=6, sticky="w")
+        self.rb_frame = SlateFrame(actions)
+        self.rb_frame.grid(row=0, column=1, padx=(0, 12), pady=6, sticky="w")
+        SlateButton(actions, text="Review & Save", command=self.open_detail_window).grid(
+            row=0, column=2, padx=6)
+        results_wrap = SlateFrame(bl)
+        results_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.result_text = SlateText(results_wrap, height=10)
+        self.result_text.pack(side='left', fill=tk.BOTH, expand=True)
+        res_scroll = tk.Scrollbar(
+            results_wrap, orient='vertical', command=self.result_text.yview)
+        res_scroll.pack(side='right', fill='y')
+        self.result_text.configure(yscrollcommand=res_scroll.set)
+
+        # Reference images
+        br = SlateFrame(main)
+        br.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(6, 0))
+        SlateTitle(br, text='Reference images').pack(
+            anchor='w', padx=8, pady=(8, 6))
+        note = "DuckDuckGo previews" if _DDG_OK else "Install: pip install duckduckgo-search"
+        self.ref_note = SlateLabel(br, text=note)
+        self.ref_note.pack(anchor='w', padx=8, pady=(0, 6))
+        self.ref_frame = SlateFrame(br)
+        self.ref_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        for c in (0, 1):
+            self.ref_frame.grid_columnconfigure(c, weight=1)
+        self.ref_imgs = []
+        self.ref_widgets = []
+        for i in range(4):
+            ph = SlateLabel(self.ref_frame, text="—",
+                            font=('Segoe UI', 10, 'italic'))
+            r, c = divmod(i, 2)
+            ph.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
+            self.ref_widgets.append(ph)
+
+        self._rb_widgets = []
+        self._last_image_path = ""
+        self._chosen_label = ""
+
+    def _clear_reference_images(self, msg=""):
+        for w in self.ref_widgets:
+            w.config(image='', text="—")
+        if msg:
+            self.ref_note.config(text=msg)
+
+    def _set_reference_images(self, items):
+        self.ref_imgs.clear()
+        for w in self.ref_widgets:
+            w.config(image='', text="—")
+        for i, (img_url, page_url) in enumerate(items[:4]):
+            try:
+                r = requests.get(img_url, timeout=10)
+                r.raise_for_status()
+                im = Image.open(io.BytesIO(r.content))
+                im.thumbnail((180, 180), Image.Resampling.LANCZOS)
+                tk_im = ImageTk.PhotoImage(im)
+                self.ref_widgets[i].config(image=tk_im, text='')
+                self.ref_widgets[i].image = tk_im
+                self.ref_widgets[i].bind(
+                    "<Button-1>", lambda e, u=page_url: webbrowser.open(u))
+            except Exception:
+                self.ref_widgets[i].config(text="(failed)")
+
+    def on_guess_selected(self, term: str):
+        self._chosen_label = term
+        if not _DDG_OK:
+            self._clear_reference_images(
+                "Install: pip install duckduckgo-search")
+            return
+        query = _build_reference_query(self.category_var.get(), term)
+        self._clear_reference_images("Searching images…")
+
+        def _work():
+            results = ddg_image_search(query, max_results=4)
+
+            def _ui():
+                if results:
+                    self.ref_note.config(text=f"Results for: {term}")
+                    self._set_reference_images(results)
+                else:
+                    self._clear_reference_images("No images found.")
+            self.master.after(0, _ui)
+        threading.Thread(target=_work, daemon=True).start()
+
+    def view_library(self): LibraryWindow(self.master)
+
+    def select_image(self):
+        p = filedialog.askopenfilename(
+            filetypes=[('Image files', '*.jpg *.jpeg *.png')])
+        if p:
+            self.process_image(p)
+
+    def capture_image(self):
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            messagebox.showerror('Error', 'Camera not accessible.')
+            return
+        cv2.namedWindow('Press SPACE to capture', cv2.WINDOW_NORMAL)
+        frame = None
+        while True:
+            ok, img = cap.read()
+            if not ok:
+                break
+            cv2.imshow('Press SPACE to capture', img)
+            key = cv2.waitKey(1)
+            if key == 32:
+                frame = img.copy()
+                break
+            elif key == 27:
+                break
+        cap.release()
+        cv2.destroyAllWindows()
+        if frame is not None:
+            self.process_frame(frame)
+
+    def process_image(self, path):
+        try:
+            img = Image.open(path).resize((300, 300))
+            tk_img = ImageTk.PhotoImage(img)
+            self.image_label.config(image=tk_img, text='')
+            self.image_label.image = tk_img
+            self.classify_and_display(path)
+        except Exception as e:
+            messagebox.showerror('Error', str(e))
+
+    def process_frame(self, frame):
+        try:
+            tmp = os.path.join(tempfile.gettempdir(), 'artifacts_capture.jpg')
+            if not cv2.imwrite(tmp, frame):
+                messagebox.showerror('Error', 'Could not write temp image.')
+                return
+            img = Image.fromarray(cv2.cvtColor(
+                frame, cv2.COLOR_BGR2RGB)).resize((300, 300))
+            tk_img = ImageTk.PhotoImage(img)
+            self.image_label.config(image=tk_img, text='')
+            self.image_label.image = tk_img
+            self.classify_and_display(tmp)
+        except Exception as e:
+            messagebox.showerror('Error', str(e))
+
+    def classify_and_display(self, image_path: str):
+        cat = self.category_var.get().strip().lower() or 'other'
+        result = vc.classify_image(image_path, cat)
+        openai_block = result.get(
+            'openai', {}) if isinstance(result, dict) else {}
+        oa_guesses = (openai_block.get('guesses') or [])[:3]
+
+        self.result_text.config(state='normal')
+        self.result_text.delete(1.0, tk.END)
+        if oa_guesses:
+            for i, g in enumerate(oa_guesses, 1):
+                label = g.get('label', 'Unknown')
+                conf = float(g.get('confidence', 0) or 0)
+                rationale = g.get('rationale', '')
+                self.result_text.insert(
+                    tk.END, f"  {i}. {label}  [conf {conf:.1%}]\n")
+                if rationale:
+                    self.result_text.insert(tk.END, f"     ↳ {rationale}\n")
+        else:
+            self.result_text.insert(tk.END, "  (no guesses)\n")
+        self.result_text.config(state='disabled')
+
+        self._last_image_path = image_path
+        self._refresh_guess_radios(oa_guesses)
+
+    def _refresh_guess_radios(self, guesses):
+        for w in getattr(self, "_rb_widgets", []):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._rb_widgets = []
+        self.choice_var = getattr(self, "choice_var", tk.StringVar(value=""))
+        self.choice_var.set("")
+        for i, g in enumerate(guesses[:3], 1):
+            label = g.get("label", f"Option {i}")
+            rb = tk.Radiobutton(
+                self.rb_frame, text=label, value=label, variable=self.choice_var,
+                command=lambda val=label: self.on_guess_selected(val),
+                bg=COLORS['bg_panel'], fg=COLORS['fg_primary'],
+                selectcolor=COLORS['accent_b'], activebackground=COLORS['bg_panel'],
+                font=('Segoe UI', 10), anchor='w', indicatoron=1, takefocus=1
+            )
+            rb.pack(anchor="w", pady=2, fill='x')
+            self._rb_widgets.append(rb)
+        if self._rb_widgets:
+            self._rb_widgets[0].invoke()
+
+    def open_detail_window(self):
+        chosen = (self.choice_var.get() or "").strip()
+        if not chosen:
+            messagebox.showinfo(
+                "Pick one", "Please select one of the guesses first.")
+            return
+        ItemDetailWindow(self.master, initial_name=chosen,
+                         category=(self.category_var.get() or "other").strip(),
+                         photo_path=self._last_image_path or "")
+
+
+# ---------- App entry ----------
+if __name__ == '__main__':
+    root = tk.Tk()
+    root.configure(bg=COLORS['bg_app'])
+    app = ClassifierApp(root)
+    root.mainloop()
