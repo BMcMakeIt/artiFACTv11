@@ -1,0 +1,260 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/artiFACTSv11.1.py b/artiFACTSv11.1.py
+index fc022abdbca466958260552c58a1f5198fadb111..b1508c643e9aee0cc8f0c84f9c5b8006a835e5cc 100644
+--- a/artiFACTSv11.1.py
++++ b/artiFACTSv11.1.py
+@@ -1160,61 +1160,62 @@ class ItemDetailWindow(tk.Toplevel):
+         # Pinned buttons
+         btns = SlateFrame(self)
+         btns.pack(fill=tk.X, padx=12, pady=(0, 12))
+         self.collect_btn = SlateButton(
+             btns, text="Collect Details", command=self.collect_details)
+         self.collect_btn.pack(side='left', padx=6)
+         SlateButton(btns, text="Save Item", command=self.save_item).pack(
+             side='left', padx=6)
+         SlateButton(btns, text="Cancel", command=self.destroy).pack(
+             side='left', padx=6)
+         self.status = SlateLabel(btns, text="")
+         self.status.pack(side='left', padx=12)
+ 
+     def _add_field(self, parent, key: str, is_api: bool):
+         row = SlateFrame(parent)
+         row.pack(fill=tk.X, pady=3)
+         row.grid_columnconfigure(1, weight=1)
+         label = key.replace("_", " ")
+         SlateLabel(row, text=label).grid(
+             row=0, column=0, sticky='e', padx=(8, 6))
+         var = tk.StringVar(value="")
+         e = tk.Entry(row, textvariable=var, bg=COLORS['bg_card'], fg=COLORS['fg_primary'],
+                      insertbackground=COLORS['accent_a'], relief='flat', font=('Segoe UI', 10))
+         e.grid(row=0, column=1, sticky='we')
+         (self.meta_entries if is_api else self.details_entries)[key] = e
+-        if not is_api and key == "barcode_ean_upc":
++        if not is_api and key in {"barcode_ean_upc", "sku_upc"}:
+             try:
+-                btn = SlateButton(row, text="Scan", command=self.scan_barcode)
++                btn = SlateButton(row, text="Scan",
++                                  command=lambda k=key: self.scan_barcode(k))
+                 btn.grid(row=0, column=2, padx=(6, 8))
+             except Exception:
+                 pass
+ 
+ 
+ 
+-def scan_barcode(self):
+-        """Open camera and decode a UPC/EAN; writes to barcode_ean_upc. Threaded (no GUI freeze)."""
++    def scan_barcode(self, field_key: str = "barcode_ean_upc"):
++        """Open camera and decode a UPC/EAN; writes to the given field. Threaded (no GUI freeze)."""
+         import tkinter as _tk, threading
+         try:
+             import cv2
+             from PIL import Image, ImageTk
+         except Exception:
+             messagebox.showinfo("Barcode scan", "Install deps: pip install opencv-python pillow pyzbar")
+             return
+         try:
+             from pyzbar.pyzbar import decode as _pz_decode
+         except Exception:
+             _pz_decode = None
+ 
+         def _digits(s): return "".join(ch for ch in (s or "") if ch.isdigit())
+         def _ean13_ok(s):
+             if len(s) != 13 or not s.isdigit(): return False
+             d = list(map(int, s)); chk = d[-1]
+             ss = 3*sum(d[0:12:2]) + sum(d[1:12:2])
+             return (10 - (ss % 10)) % 10 == chk
+         def _upc_ok(s):
+             if len(s) != 12 or not s.isdigit(): return False
+             d = list(map(int, s)); chk = d[-1]
+             ss = 3*sum(d[0:11:2]) + sum(d[1:11:2])
+             return (10 - (ss % 10)) % 10 == chk
+         def _normalize(code):
+             s = _digits(code)
+diff --git a/artiFACTSv11.1.py b/artiFACTSv11.1.py
+index fc022abdbca466958260552c58a1f5198fadb111..b1508c643e9aee0cc8f0c84f9c5b8006a835e5cc 100644
+--- a/artiFACTSv11.1.py
++++ b/artiFACTSv11.1.py
+@@ -1271,51 +1272,51 @@ def scan_barcode(self):
+         win = _tk.Toplevel(self); win.title("Scan barcode"); win.configure(bg=COLORS['bg_panel']); win.transient(self); win.grab_set()
+         preview = _tk.Label(win, bg=COLORS['bg_panel']); preview.pack(padx=10, pady=(10,6))
+         status = _tk.Label(win, text="Align barcode in the box. Press Capture (or Space).", bg=COLORS['bg_panel'], fg=COLORS['fg_primary']); status.pack(padx=10, pady=(0,8))
+         btns = _tk.Frame(win, bg=COLORS['bg_panel']); btns.pack(padx=10, pady=(0,10))
+         cap_btn = SlateButton(btns, text="Capture"); cap_btn.pack(side='left', padx=6)
+         SlateButton(btns, text="Close", command=win.destroy).pack(side='left', padx=6)
+ 
+         import cv2
+         cap = cv2.VideoCapture(0, cv2.CAP_DSHOW) if hasattr(cv2, "CAP_DSHOW") else cv2.VideoCapture(0)
+         if not cap or not cap.isOpened():
+             win.destroy(); messagebox.showerror("Barcode scanner", "No camera found."); return
+         try: cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080); cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+         except Exception: pass
+         try: detector = cv2.barcode.BarcodeDetector()
+         except Exception: detector = None
+ 
+         last = {"frame": None}; busy = {"flag": False}
+         def on_close():
+             try: cap.release()
+             except Exception: pass
+             win.destroy()
+         win.protocol("WM_DELETE_WINDOW", on_close); win.bind("<Escape>", lambda e: on_close())
+ 
+         def commit(val):
+             s = _normalize(val)
+-            e = self.details_entries.get("barcode_ean_upc")
++            e = self.details_entries.get(field_key)
+             if e: e.delete(0, tk.END); e.insert(0, s)
+             else: messagebox.showinfo("Barcode", s)
+             on_close()
+ 
+         def after(guess):
+             busy["flag"] = False
+             try: cap_btn.config(state="normal", text="Capture")
+             except Exception: pass
+             if guess: commit(guess)
+             else: status.config(text="No barcode found. Try again.")
+ 
+         def do_capture(event=None):
+             if busy["flag"]: return
+             frame = last["frame"]
+             if frame is None: return
+             busy["flag"] = True
+             try: cap_btn.config(state="disabled", text="Processing…")
+             except Exception: pass
+             status.config(text="Processing capture…"); win.update_idletasks()
+ 
+             img = frame.copy()
+             h, w = img.shape[:2]
+             rw, rh = int(w*0.96), int(h*0.55); rx, ry = (w-rw)//2, (h-rh)//2
+             roi = img[ry:ry+rh, rx:rx+rw].copy()
+ 
+diff --git a/artiFACTSv11.1.py b/artiFACTSv11.1.py
+index fc022abdbca466958260552c58a1f5198fadb111..b1508c643e9aee0cc8f0c84f9c5b8006a835e5cc 100644
+--- a/artiFACTSv11.1.py
++++ b/artiFACTSv11.1.py
+@@ -1329,51 +1330,51 @@ def scan_barcode(self):
+                 except Exception:
+                     self.after(0, lambda: after(""))
+             threading.Thread(target=worker, daemon=True).start()
+ 
+         cap_btn.config(command=do_capture); win.bind("<space>", lambda e: do_capture())
+ 
+         def tick():
+             ok, frame = cap.read()
+             if not ok:
+                 win.after(15, tick); return
+             last["frame"] = frame.copy()
+             h, w = frame.shape[:2]
+             rw, rh = int(w*0.96), int(h*0.55); rx, ry = (w-rw)//2, (h-rh)//2
+             cv2.rectangle(frame, (rx, ry), (rx+rw, ry+rh), (0,255,0), 2)
+             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+             im = Image.fromarray(frame_rgb)
+             maxw = 960
+             if w > maxw: im = im.resize((maxw, int(maxw*h/w)))
+             tk_img = ImageTk.PhotoImage(im)
+             preview.configure(image=tk_img); preview.image = tk_img
+             win.after(30, tick)
+ 
+         tick()
+ 
+ 
+-def _gather_user_helpers(self) -> dict:
++    def _gather_user_helpers(self) -> dict:
+         helpers = {}
+         for k, e in self.details_entries.items():
+             helpers[k] = e.get().strip()
+         for k, e in self.meta_entries.items():
+             v = e.get().strip()
+             if v:
+                 helpers.setdefault(k, v)
+         return helpers
+ 
+     def _apply_details(self, meta: dict):
+         if not meta:
+             self.status.config(text="No enrichment found.")
+             return
+         filled = 0
+         for k, v in (meta or {}).items():
+             if k in self.meta_entries and v:
+                 entry = self.meta_entries[k]
+                 entry.delete(0, tk.END)
+                 entry.insert(0, v)
+                 filled += 1
+         self.status.config(text=("No confident fields returned." if filled ==
+                            0 else f"Details collected. {filled} field(s) populated."))
+ 
+     def collect_details(self):
+         alias_map = {'toys': 'toy', 'records': 'vinyl', 'record': 'vinyl',
+diff --git a/artiFACTSv11.1.py b/artiFACTSv11.1.py
+index fc022abdbca466958260552c58a1f5198fadb111..b1508c643e9aee0cc8f0c84f9c5b8006a835e5cc 100644
+--- a/artiFACTSv11.1.py
++++ b/artiFACTSv11.1.py
+@@ -1420,58 +1421,58 @@ def _gather_user_helpers(self) -> dict:
+                     self.status.config(text="Enrichment failed.")
+                 else:
+                     self._apply_details(meta)
+                 self.collect_btn.config(state='normal')
+             self.after(0, _ui)
+         threading.Thread(target=_work, daemon=True).start()
+ 
+     def save_item(self):
+         name = self.details_entries.get("name").get().strip(
+         ) if self.details_entries.get("name") else ""
+         if not name:
+             messagebox.showerror(
+                 "Missing name", "Please enter a name before saving.")
+             return
+         details = {}
+         for k, e in self.details_entries.items():
+             v = e.get().strip()
+             if v:
+                 details[k] = v
+         for k, e in self.meta_entries.items():
+             v = e.get().strip()
+             if v:
+                 details[k] = v
+ 
+ # Include hidden Discogs fields captured during enrichment
+-try:
+-    if hasattr(self, "_last_meta_result") and isinstance(self._last_meta_result, dict):
+-        for hk in ("discogs_release_id","discogs_url","discogs_median_price_usd","discogs_low_high_usd"):
+-            hv = self._last_meta_result.get(hk)
+-            if hv and hk not in details:
+-                details[hk] = str(hv)
+-except Exception:
+-    pass
++        try:
++            if hasattr(self, "_last_meta_result") and isinstance(self._last_meta_result, dict):
++                for hk in ("discogs_release_id","discogs_url","discogs_median_price_usd","discogs_low_high_usd"):
++                    hv = self._last_meta_result.get(hk)
++                    if hv and hk not in details:
++                        details[hk] = str(hv)
++        except Exception:
++            pass
+ 
+         try:
+             item_id = save_item_full(
+                 name, self.category, self.photo_path, details)
+             messagebox.showinfo("Saved", f"Item saved (id {item_id}).")
+             self.destroy()
+         except Exception as e:
+             messagebox.showerror("DB error", str(e))
+ 
+ # ---------- Classifier App (pass-in root) ----------
+ 
+ 
+ class ClassifierApp:
+     def __init__(self, root: tk.Tk):
+         self.master = root
+         self.master.title('artiFACTS')
+         self.master.configure(bg=COLORS['bg_app'])
+         try:
+             self.master.state('zoomed')
+         except tk.TclError:
+             self.master.attributes('-zoomed', True)
+ 
+         banner_frame = SlateFrame(self.master)
+         banner_frame.pack(fill=tk.X, padx=12, pady=(12, 6))
+         self.banner = tk.Canvas(banner_frame, height=96,
+ 
+EOF
+)
