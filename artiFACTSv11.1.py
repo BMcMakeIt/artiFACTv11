@@ -1250,7 +1250,7 @@ class ItemDetailWindow(tk.Toplevel):
             return vals[0]
 
         def _heavy(img, detector):
-            import cv2
+            import cv2, numpy as np
             h, w = img.shape[:2]
             for s in (1.0, 1.3, 1.6, 2.0, 2.5):
                 try: im = cv2.resize(img, (int(w*s), int(h*s)), interpolation=cv2.INTER_CUBIC) if s!=1.0 else img.copy()
@@ -1264,7 +1264,16 @@ class ItemDetailWindow(tk.Toplevel):
                         except Exception: r = crop
                         try: gray = cv2.cvtColor(r, cv2.COLOR_BGR2GRAY)
                         except Exception: gray = r
-                        for cand in (r, gray):
+                        try:
+                            blur = cv2.GaussianBlur(gray, (5,5), 0)
+                            th_a = cv2.adaptiveThreshold(blur,255,cv2.ADAPTIVE_THRESH_MEAN_C,cv2.THRESH_BINARY,11,2)
+                            _, th_o = cv2.threshold(blur,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+                            kernel = np.ones((3,3), np.uint8)
+                            morph = cv2.morphologyEx(th_o, cv2.MORPH_CLOSE, kernel)
+                            cands = (r, gray, blur, th_a, th_o, morph)
+                        except Exception:
+                            cands = (r, gray)
+                        for cand in cands:
                             code = _decode_once(cand, detector)
                             if code: return code
             return ""
