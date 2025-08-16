@@ -1182,17 +1182,18 @@ class ItemDetailWindow(tk.Toplevel):
                      insertbackground=COLORS['accent_a'], relief='flat', font=('Segoe UI', 10))
         e.grid(row=0, column=1, sticky='we')
         (self.meta_entries if is_api else self.details_entries)[key] = e
-        if not is_api and key == "barcode_ean_upc":
+        if not is_api and key in {"barcode_ean_upc", "sku_upc"}:
             try:
-                btn = SlateButton(row, text="Scan", command=self.scan_barcode)
+                btn = SlateButton(row, text="Scan",
+                                  command=lambda k=key: self.scan_barcode(k))
                 btn.grid(row=0, column=2, padx=(6, 8))
             except Exception:
                 pass
 
 
 
-def scan_barcode(self):
-        """Open camera and decode a UPC/EAN; writes to barcode_ean_upc. Threaded (no GUI freeze)."""
+    def scan_barcode(self, field_key: str = "barcode_ean_upc"):
+        """Open camera and decode a UPC/EAN; writes to the given field. Threaded (no GUI freeze)."""
         import tkinter as _tk, threading
         try:
             import cv2
@@ -1293,7 +1294,7 @@ def scan_barcode(self):
 
         def commit(val):
             s = _normalize(val)
-            e = self.details_entries.get("barcode_ean_upc")
+            e = self.details_entries.get(field_key)
             if e: e.delete(0, tk.END); e.insert(0, s)
             else: messagebox.showinfo("Barcode", s)
             on_close()
@@ -1351,7 +1352,7 @@ def scan_barcode(self):
         tick()
 
 
-def _gather_user_helpers(self) -> dict:
+    def _gather_user_helpers(self) -> dict:
         helpers = {}
         for k, e in self.details_entries.items():
             helpers[k] = e.get().strip()
@@ -1442,14 +1443,14 @@ def _gather_user_helpers(self) -> dict:
                 details[k] = v
 
 # Include hidden Discogs fields captured during enrichment
-try:
-    if hasattr(self, "_last_meta_result") and isinstance(self._last_meta_result, dict):
-        for hk in ("discogs_release_id","discogs_url","discogs_median_price_usd","discogs_low_high_usd"):
-            hv = self._last_meta_result.get(hk)
-            if hv and hk not in details:
-                details[hk] = str(hv)
-except Exception:
-    pass
+        try:
+            if hasattr(self, "_last_meta_result") and isinstance(self._last_meta_result, dict):
+                for hk in ("discogs_release_id","discogs_url","discogs_median_price_usd","discogs_low_high_usd"):
+                    hv = self._last_meta_result.get(hk)
+                    if hv and hk not in details:
+                        details[hk] = str(hv)
+        except Exception:
+            pass
 
         try:
             item_id = save_item_full(
