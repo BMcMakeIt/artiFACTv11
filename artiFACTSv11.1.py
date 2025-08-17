@@ -689,19 +689,17 @@ PHOTO_SLOTS = {
 def _ensure_tables():
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
-    # Detect legacy schema where `name` was unique and migrate to a
-    # composite uniqueness on (name, category)
-    cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='items'")
-    existing = cur.fetchone()
-    if existing and "UNIQUE(name, category)" not in existing[0]:
-        cur.execute("""CREATE TABLE IF NOT EXISTS items_new (
+
+    # Make sure the old items table exists (some installs may not have it yet)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS items (
             id INTEGER PRIMARY KEY,
             name TEXT,
             category TEXT,
             subcategory TEXT,
             description TEXT,
             fact TEXT,
-            found_date TEXT,
+            found_on TEXT,
             found_location TEXT,
             estimated_age TEXT,
             material TEXT,
@@ -713,43 +711,92 @@ def _ensure_tables():
             region TEXT,
             era_or_epoch TEXT,
             common_uses TEXT,
-            toxicity_safety TEXT,
-            UNIQUE(name, category)
-        )""")
-        cur.execute("INSERT INTO items_new SELECT * FROM items")
+            toxicity_safety TEXT
+        )
+    """)
+
+    # Discover current columns on 'items'
+    cur.execute("PRAGMA table_info(items)")
+    old_cols = [r[1] for r in cur.fetchall()]
+
+    # Desired final schema (with UNIQUE(name, category))
+    new_cols = [
+        "id", "name", "category", "subcategory", "description", "fact",
+        "found_on", "found_location", "estimated_age", "material",
+        "display_case", "notes", "photo_path", "added_on",
+        "scientific_name", "region", "era_or_epoch", "common_uses",
+        "toxicity_safety"
+    ]
+
+    # If either 'category' is missing OR the unique constraint is missing,
+    # rebuild the table safely.
+    needs_rebuild = ("category" not in old_cols)
+
+    if not needs_rebuild:
+        # Check if UNIQUE(name, category) exists
+        cur.execute("PRAGMA index_list(items)")
+        idx_rows = cur.fetchall()
+        unique_ok = False
+        for _, idx_name, _, _, _ in idx_rows:
+            cur.execute(f"PRAGMA index_info({idx_name})")
+            cols = [r[2] for r in cur.fetchall()]
+            # A unique index on (name, category) could be named anything
+            if set(cols) == {"name", "category"}:
+                # Confirm it's actually UNIQUE
+                cur.execute(f"SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (idx_name,))
+                sql = (cur.fetchone() or [""])[0] or ""
+                if "UNIQUE" in sql.upper():
+                    unique_ok = True
+                    break
+        if not unique_ok:
+            needs_rebuild = True
+
+    if needs_rebuild:
+        # Build the new table with the desired schema + unique constraint
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS items_new (
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                category TEXT,
+                subcategory TEXT,
+                description TEXT,
+                fact TEXT,
+                found_on TEXT,
+                found_location TEXT,
+                estimated_age TEXT,
+                material TEXT,
+                display_case TEXT,
+                notes TEXT,
+                photo_path TEXT,
+                added_on DATETIME DEFAULT CURRENT_TIMESTAMP,
+                scientific_name TEXT,
+                region TEXT,
+                era_or_epoch TEXT,
+                common_uses TEXT,
+                toxicity_safety TEXT,
+                UNIQUE(name, category)
+            )
+        """)
+
+        # Build a SELECT that pulls what exists, fills what doesn't.
+        select_cols = []
+        for col in new_cols:
+            if col in old_cols:
+                select_cols.append(col)
+            elif col == "category":
+                # Old installs may not have category yet
+                select_cols.append("'' AS category")
+            else:
+                select_cols.append(f"NULL AS {col}")
+
+        cur.execute(f"""
+            INSERT INTO items_new ({', '.join(new_cols)})
+            SELECT {', '.join(select_cols)} FROM items
+        """)
+
         cur.execute("DROP TABLE items")
         cur.execute("ALTER TABLE items_new RENAME TO items")
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS items (
-        id INTEGER PRIMARY KEY,
-        name TEXT,
-        category TEXT,
-        subcategory TEXT,
-        description TEXT,
-        fact TEXT,
-        found_date TEXT,
-        found_location TEXT,
-        estimated_age TEXT,
-        material TEXT,
-        display_case TEXT,
-        notes TEXT,
-        photo_path TEXT,
-        added_on DATETIME DEFAULT CURRENT_TIMESTAMP,
-        scientific_name TEXT,
-        region TEXT,
-        era_or_epoch TEXT,
-        common_uses TEXT,
-        toxicity_safety TEXT,
-        UNIQUE(name, category)
-    )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS item_details (
-        id INTEGER PRIMARY KEY,
-        item_id INTEGER NOT NULL,
-        key TEXT NOT NULL,
-        value TEXT,
-        UNIQUE(item_id, key),
-        FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
-    )""")
     con.commit()
     con.close()
 
