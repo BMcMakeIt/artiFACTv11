@@ -1368,12 +1368,14 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
             return (u or "").strip().lower()
 
     seen_urls = set()
+    saved_urls = set()
 
     def _save(url: str) -> bool:
         nonlocal slot
         if slot > max_slots or not url:
             return False
-        if _norm_url(url) in seen_urls:
+        nu = _norm_url(url)
+        if nu in saved_urls:
             return False
         ext = os.path.splitext(url.split("?")[0])[1].lower()
         if ext not in (".jpg", ".jpeg", ".png", ".webp"):
@@ -1389,10 +1391,11 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
             return False
 
         ok = _download_image(url, dest)
+        seen_urls.add(nu)
         if ok:
             meta[f"img{slot}_path"] = dest
             meta[f"img{slot}_src"] = url
-            seen_urls.add(_norm_url(url))
+            saved_urls.add(nu)
             slot += 1
         return ok
 
@@ -1475,25 +1478,35 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
         q2 = f"{q_name} specimen"
         q3 = f"{q_name} macro"
         q4 = f"{q_name} museum"
+        need = max_slots - (slot - 1)
         all_cands = []
 
         for q in (q1, q2, q3, q4):
+            if need <= 0:
+                break
             qq = q.strip()
             if not qq:
                 continue
             # ask for several candidates at once
-            res = ddg_image_search(_build_reference_query(cat, qq), max_results=6)
+            res = ddg_image_search(
+                _build_reference_query(cat, qq),
+                max_results=min(12, need * 4),
+            )
             for (img_url, _page) in res:
                 nu = _norm_url(img_url)
                 if nu and nu not in seen_urls:
                     all_cands.append(img_url)
-            if len(all_cands) >= max_slots:
+                    seen_urls.add(nu)
+                    if len(all_cands) >= need:
+                        break
+            if len(all_cands) >= need:
                 break
 
         for url in all_cands:
-            if slot > max_slots:
+            if need <= 0:
                 break
-            _save(url)
+            if _save(url):
+                need -= 1
 
     return meta
 
