@@ -720,6 +720,19 @@ def _ensure_tables():
         )
     """)
 
+    # Ensure auxiliary details table exists with composite unique key for upserts
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS item_details (
+            item_id INTEGER,
+            key TEXT,
+            value TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_item_details_item_key
+        ON item_details (item_id, key)
+    """)
+
     # Discover current columns on 'items'
     cur.execute("PRAGMA table_info(items)")
     old_cols = [r[1] for r in cur.fetchall()]
