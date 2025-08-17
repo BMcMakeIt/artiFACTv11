@@ -689,9 +689,61 @@ PHOTO_SLOTS = {
 def _ensure_tables():
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
+    # Detect legacy schema where `name` was unique and migrate to a
+    # composite uniqueness on (name, category). Explicit column lists
+    # avoid failures when older tables have extra fields.
+    cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='items'")
+    existing = cur.fetchone()
+    if existing and "UNIQUE(name, category)" not in existing[0]:
+        cur.execute("PRAGMA table_info(items)")
+        old_cols = {r[1] for r in cur.fetchall()}
+
+        cur.execute("""CREATE TABLE IF NOT EXISTS items_new (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            category TEXT,
+            subcategory TEXT,
+            description TEXT,
+            fact TEXT,
+            found_date TEXT,
+            found_location TEXT,
+            estimated_age TEXT,
+            material TEXT,
+            display_case TEXT,
+            notes TEXT,
+            photo_path TEXT,
+            added_on DATETIME DEFAULT CURRENT_TIMESTAMP,
+            scientific_name TEXT,
+            region TEXT,
+            era_or_epoch TEXT,
+            common_uses TEXT,
+            toxicity_safety TEXT,
+            UNIQUE(name, category)
+        )""")
+        new_cols = [
+            "id", "name", "category", "subcategory", "description", "fact",
+            "found_date", "found_location", "estimated_age", "material",
+            "display_case", "notes", "photo_path", "added_on",
+            "scientific_name", "region", "era_or_epoch", "common_uses",
+            "toxicity_safety"
+        ]
+        select_cols = []
+        for col in new_cols:
+            if col in old_cols:
+                select_cols.append(col)
+            elif col == "category":
+                select_cols.append("'' AS category")
+            else:
+                select_cols.append(f"NULL AS {col}")
+        cur.execute(
+            f"INSERT INTO items_new ({', '.join(new_cols)}) SELECT {', '.join(select_cols)} FROM items"
+        )
+        cur.execute("DROP TABLE items")
+        cur.execute("ALTER TABLE items_new RENAME TO items")
+
     cur.execute("""CREATE TABLE IF NOT EXISTS items (
         id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE,
+        name TEXT,
         category TEXT,
         subcategory TEXT,
         description TEXT,
@@ -708,7 +760,8 @@ def _ensure_tables():
         region TEXT,
         era_or_epoch TEXT,
         common_uses TEXT,
-        toxicity_safety TEXT
+        toxicity_safety TEXT,
+        UNIQUE(name, category)
     )""")
     cur.execute("""CREATE TABLE IF NOT EXISTS item_details (
         id INTEGER PRIMARY KEY,
@@ -729,16 +782,30 @@ def upsert_item(name: str, category: str, photo_path: str) -> int:
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     cur.execute(
-        "SELECT id FROM items WHERE lower(name)=lower(?) LIMIT 1", (name,))
+        "SELECT id, category FROM items WHERE lower(name)=lower(?) AND lower(category)=lower(?)",
+        (name, category))
     row = cur.fetchone()
     if row:
         item_id = row[0]
-        cur.execute("UPDATE items SET category=?, photo_path=? WHERE id=?",
-                    (category, photo_path, item_id))
+        cur.execute("UPDATE items SET photo_path=? WHERE id=?", (photo_path, item_id))
     else:
-        cur.execute("INSERT INTO items(name, category, photo_path) VALUES (?,?,?)",
-                    (name, category, photo_path))
-        item_id = cur.lastrowid
+        # check if item exists under a different category (category change)
+        cur.execute("SELECT id, category FROM items WHERE lower(name)=lower(?)", (name,))
+        row = cur.fetchone()
+        if row:
+            item_id, old_cat = row
+            if old_cat and old_cat.lower() != (category or '').lower():
+                old_dir = os.path.join(PHOTO_DIR, old_cat.lower(), str(item_id))
+                shutil.rmtree(old_dir, ignore_errors=True)
+                cur.execute("DELETE FROM item_details WHERE item_id=? AND key LIKE 'img%_path'", (item_id,))
+                cur.execute("DELETE FROM item_details WHERE item_id=? AND key LIKE 'img%_src'", (item_id,))
+                cur.execute("DELETE FROM item_details WHERE item_id=? AND key='upload_path'", (item_id,))
+            cur.execute("UPDATE items SET category=?, photo_path=? WHERE id=?",
+                        (category, photo_path, item_id))
+        else:
+            cur.execute("INSERT INTO items(name, category, photo_path) VALUES (?,?,?)",
+                        (name, category, photo_path))
+            item_id = cur.lastrowid
     con.commit()
     con.close()
     return item_id
@@ -998,31 +1065,32 @@ class LibraryWindow(tk.Toplevel):
         self.info_text.configure(yscrollcommand=info_scroll.set)
 
         self.photo_refs = []
+        self.item_rows = []
         self.load_items()
 
     def load_items(self):
+        self.listbox.delete(0, tk.END)
+        self.item_rows = []
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT name FROM items ORDER BY name")
-        for (name,) in cur.fetchall():
-            self.listbox.insert(tk.END, name)
+        cur.execute("SELECT id, name, category FROM items ORDER BY name")
+        for item_id, name, category in cur.fetchall():
+            self.listbox.insert(tk.END, f"{name} ({category})")
+            self.item_rows.append((item_id, name, category))
         conn.close()
 
     def display_item_info(self, event):
         sel = self.listbox.curselection()
         if not sel:
             return
-        name = self.listbox.get(sel[0])
+        item_id, name, category = self.item_rows[sel[0]]
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT * FROM items WHERE name = ?", (name,))
+        cur.execute("SELECT * FROM items WHERE id = ?", (item_id,))
         row = cur.fetchone()
         cols = [d[0] for d in cur.description]
-        item_id = None
-        category = ""
         photo_path = ""
         if row:
-            item_id = row[cols.index("id")]
             category = row[cols.index("category")] or ""
             photo_path = row[cols.index("photo_path")] or ""
         self.info_text.config(state='normal')
