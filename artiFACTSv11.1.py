@@ -1356,15 +1356,30 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
     slot = 1
     max_slots = PHOTO_SLOTS.get(cat, 4)
 
+    def _norm_url(u: str) -> str:
+        try:
+            base = (u or "").split("?")[0].strip().lower()
+            # strip common tracking suffixes
+            for tail in (".jpeg", ".jpg", ".png", ".webp"):
+                if base.endswith(tail):
+                    return base
+            return base
+        except Exception:
+            return (u or "").strip().lower()
+
+    seen_urls = set()
+
     def _save(url: str) -> bool:
         nonlocal slot
         if slot > max_slots or not url:
+            return False
+        if _norm_url(url) in seen_urls:
             return False
         ext = os.path.splitext(url.split("?")[0])[1].lower()
         if ext not in (".jpg", ".jpeg", ".png", ".webp"):
             ext = ".jpg"
 
-        # find the next unused slot/file
+        # find the next unused slot/file (keeps existing files intact)
         while slot <= max_slots:
             dest = os.path.join(item_dir, f"img{slot}{ext}")
             if not os.path.exists(dest):
@@ -1377,6 +1392,7 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
         if ok:
             meta[f"img{slot}_path"] = dest
             meta[f"img{slot}_src"] = url
+            seen_urls.add(_norm_url(url))
             slot += 1
         return ok
 
@@ -1454,11 +1470,30 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
             res = ddg_image_search(_build_reference_query(cat, q), max_results=1) if q else []
             _save(res[0][0] if res else "")
     elif cat in {"fossil", "shell", "mineral"}:
-        queries = [q_name, q_name, q_name]
-        for q in queries:
-            q = q.strip()
-            res = ddg_image_search(_build_reference_query(cat, q), max_results=1) if q else []
-            _save(res[0][0] if res else "")
+        # Build a few varied queries to diversify results
+        q1 = q_name
+        q2 = f"{q_name} specimen"
+        q3 = f"{q_name} macro"
+        q4 = f"{q_name} museum"
+        all_cands = []
+
+        for q in (q1, q2, q3, q4):
+            qq = q.strip()
+            if not qq:
+                continue
+            # ask for several candidates at once
+            res = ddg_image_search(_build_reference_query(cat, qq), max_results=6)
+            for (img_url, _page) in res:
+                nu = _norm_url(img_url)
+                if nu and nu not in seen_urls:
+                    all_cands.append(img_url)
+            if len(all_cands) >= max_slots:
+                break
+
+        for url in all_cands:
+            if slot > max_slots:
+                break
+            _save(url)
 
     return meta
 
