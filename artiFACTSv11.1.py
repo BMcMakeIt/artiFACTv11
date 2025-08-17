@@ -1020,9 +1020,11 @@ class LibraryWindow(tk.Toplevel):
         cols = [d[0] for d in cur.description]
         item_id = None
         category = ""
+        photo_path = ""
         if row:
             item_id = row[cols.index("id")]
             category = row[cols.index("category")] or ""
+            photo_path = row[cols.index("photo_path")] or ""
         self.info_text.config(state='normal')
         self.info_text.delete(1.0, tk.END)
         if row:
@@ -1047,6 +1049,27 @@ class LibraryWindow(tk.Toplevel):
         for i in range(1, n+1):
             p = detail_map.get(f"img{i}_path")
             paths.append(p if p and os.path.exists(p) else None)
+
+        if any(p is None for p in paths) and item_id is not None:
+            def _bg():
+                meta = populate_photo_slots(item_id, category, name, detail_map, photo_path)
+                if meta:
+                    con = sqlite3.connect(DB_PATH)
+                    cur = con.cursor()
+                    cur.execute("PRAGMA table_info(items)")
+                    cols_set = {r[1] for r in cur.fetchall()}
+                    for k, v in meta.items():
+                        if k in cols_set:
+                            cur.execute(f"UPDATE items SET {k}=? WHERE id=?",
+                                        (str(v) if v is not None else "", item_id))
+                        cur.execute("""INSERT INTO item_details(item_id, key, value)
+                                       VALUES(?,?,?)
+                                       ON CONFLICT(item_id, key) DO UPDATE SET value=excluded.value""",
+                                    (item_id, k, str(v) if v is not None else ""))
+                    con.commit()
+                    con.close()
+                    self.after(0, lambda: self.display_item_info(None))
+            threading.Thread(target=_bg, daemon=True).start()
 
         self.image_canvas.delete('all')
         self.photo_refs.clear()
