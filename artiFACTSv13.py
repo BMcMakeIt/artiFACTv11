@@ -1448,13 +1448,15 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
         if ext not in (".jpg", ".jpeg", ".png", ".webp"):
             ext = ".jpg"
 
-        # find the next unused slot/file (keeps existing files intact)
+        # find the next unused slot/file (keeps existing files intact,
+        # regardless of extension already used)
         while slot <= max_slots:
-            dest = os.path.join(item_dir, f"img{slot}{ext}")
-            if not os.path.exists(dest):
+            pattern = os.path.join(item_dir, f"img{slot}.*")
+            if not glob.glob(pattern):
+                dest = os.path.join(item_dir, f"img{slot}{ext}")
                 break
             slot += 1
-        if slot > max_slots:
+        else:
             return False
 
         ok = _download_image(url, dest)
