@@ -1478,7 +1478,7 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
             pass
 
         # promote the local copy to img1, replacing any existing first slot
-        if cat in {"toy", "fossil", "shell", "mineral"}:
+        if cat in {"toy", "card", "fossil", "shell", "mineral"}:
             dest_first = os.path.join(item_dir, f"img1{up_ext}")
             try:
                 for f in glob.glob(os.path.join(item_dir, "img1.*")):
