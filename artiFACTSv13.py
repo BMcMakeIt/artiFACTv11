@@ -10,6 +10,7 @@ import sqlite3
 import cv2
 import os
 import shutil
+import glob
 import tempfile
 import threading
 import base64
@@ -1476,16 +1477,20 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
         except Exception:
             pass
 
-        # promote the local copy to img1 if not already present
+        # promote the local copy to img1, replacing any existing first slot
         if cat in {"toy", "fossil", "shell", "mineral"}:
             dest_first = os.path.join(item_dir, f"img1{up_ext}")
-            if not os.path.exists(dest_first):
-                try:
-                    shutil.copyfile(up_dest, dest_first)
-                    meta["img1_path"] = dest_first
-                    meta["img1_src"] = "uploaded"
-                except Exception:
-                    pass
+            try:
+                for f in glob.glob(os.path.join(item_dir, "img1.*")):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+                shutil.copyfile(up_dest, dest_first)
+                meta["img1_path"] = dest_first
+                meta["img1_src"] = "uploaded"
+            except Exception:
+                pass
             # next web save goes to slot 2
             slot = 2
 
