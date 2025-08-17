@@ -1204,24 +1204,38 @@ class LibraryWindow(tk.Toplevel):
         if row:
             category = row[cols.index("category")] or ""
             photo_path = row[cols.index("photo_path")] or ""
-        self.info_text.config(state='normal')
-        self.info_text.delete(1.0, tk.END)
-        if row:
-            for i, val in enumerate(row):
-                if cols[i] in ("id", "added_on", "photo_path"):
-                    continue
-                if val:
-                    label = cols[i].replace('_', ' ').capitalize()
-                    self.info_text.insert(tk.END, f"• {label}: {val}\n\n")
-        else:
-            self.info_text.insert(tk.END, "Item not found.")
-        self.info_text.config(state='disabled')
 
         detail_map = {}
         if item_id is not None:
             cur.execute("SELECT key, value FROM item_details WHERE item_id=?", (item_id,))
             detail_map = {k: v for k, v in cur.fetchall()}
         conn.close()
+
+        self.info_text.config(state='normal')
+        self.info_text.delete(1.0, tk.END)
+        if row:
+            schema = SCHEMAS.get(category.lower(), SCHEMAS["other"])
+            order = list(dict.fromkeys(schema["user"] + schema["api"]))
+            seen = set()
+            for i, val in enumerate(row):
+                col = cols[i]
+                if col in ("id", "added_on", "photo_path"):
+                    continue
+                if val:
+                    label = col.replace('_', ' ').capitalize()
+                    self.info_text.insert(tk.END, f"• {label}: {val}\n\n")
+                    seen.add(col)
+            for key in order:
+                if key in seen or key in HIDDEN_META_KEYS:
+                    continue
+                val = detail_map.get(key)
+                if val:
+                    label = key.replace('_', ' ').capitalize()
+                    self.info_text.insert(tk.END, f"• {label}: {val}\n\n")
+                    seen.add(key)
+        else:
+            self.info_text.insert(tk.END, "Item not found.")
+        self.info_text.config(state='disabled')
 
         n = PHOTO_SLOTS.get(category.lower(), 4)
         paths = []
