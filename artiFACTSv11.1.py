@@ -752,9 +752,13 @@ def _ensure_tables():
             needs_rebuild = True
 
     if needs_rebuild:
+        # If a previous migration left behind a partial items_new, drop it so we
+        # can recreate the table with the correct schema (including new cols)
+        cur.execute("DROP TABLE IF EXISTS items_new")
+
         # Build the new table with the desired schema + unique constraint
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS items_new (
+            CREATE TABLE items_new (
                 id INTEGER PRIMARY KEY,
                 name TEXT,
                 category TEXT,
