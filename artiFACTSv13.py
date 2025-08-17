@@ -433,6 +433,13 @@ def enrich_generic_openai(name: str, category: str, photo_path: str, helpers: di
             "\n- description = 1–2 plain sentences summarizing appearance and notable traits."
             "\n- fact = one short, interesting, verifiable tidbit."
         )
+    elif category.lower() == "fossil":
+        guidance = (
+            "\nField guidance for fossils:"
+            "\n- toxicity_safety = 'non-toxic' unless the specimen itself is hazardous."
+            "\n- description = 1–2 plain sentences summarizing the fossil’s appearance and significance."
+            "\n- fact = one short, interesting, verifiable tidbit (age, locality, or paleo note)."
+        )
 
     user_text = (
         f"Item category: {category}\n"
