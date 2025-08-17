@@ -867,7 +867,12 @@ def upsert_item(name: str, category: str, photo_path: str) -> int:
 def save_item_full(name: str, category: str, photo_path: str, details: dict) -> int:
     item_id = upsert_item(name, category, photo_path)
     details = details or {}
-    photo_meta = populate_photo_slots(item_id, category, name, details, photo_path)
+    item_dir_abs = os.path.abspath(os.path.join(PHOTO_DIR, category.lower(), str(item_id)))
+    uploaded_arg = photo_path if (
+        photo_path and os.path.commonpath([
+            os.path.abspath(photo_path), item_dir_abs]) == item_dir_abs
+    ) else photo_path  # allow first-time external upload; populator will copy & promote
+    photo_meta = populate_photo_slots(item_id, category, name, details, uploaded_arg)
     details.update(photo_meta)
     if details:
         con = sqlite3.connect(DB_PATH)
@@ -1157,6 +1162,7 @@ class LibraryWindow(tk.Toplevel):
         self.info_text.configure(yscrollcommand=info_scroll.set)
 
         self.photo_refs = []
+        self._img_populating = set()
         self.item_rows = {}
         self.load_items()
 
@@ -1224,28 +1230,37 @@ class LibraryWindow(tk.Toplevel):
             paths.append(p if p and os.path.exists(p) else None)
 
         if any(p is None for p in paths) and item_id is not None:
+            # prevent parallel/looped populates
+            if item_id in self._img_populating:
+                return
+            self._img_populating.add(item_id)
+
             def _bg():
-                item_dir = os.path.join(PHOTO_DIR, (category or "").lower(), str(item_id))
-                uploaded = photo_path if (
-                    photo_path and os.path.commonpath([
-                        os.path.abspath(photo_path), os.path.abspath(item_dir)])
-                    == os.path.abspath(item_dir)) else ""
-                meta = populate_photo_slots(item_id, category, name, detail_map, uploaded)
-                if meta:
-                    con = sqlite3.connect(DB_PATH)
-                    cur = con.cursor()
-                    cur.execute("PRAGMA table_info(items)")
-                    cols_set = {r[1] for r in cur.fetchall()}
-                    for k, v in meta.items():
-                        if k in cols_set:
-                            cur.execute(f"UPDATE items SET {k}=? WHERE id=?",
-                                        (str(v) if v is not None else "", item_id))
-                        cur.execute("""INSERT INTO item_details(item_id, key, value)
-                                       VALUES(?,?,?)
-                                       ON CONFLICT(item_id, key) DO UPDATE SET value=excluded.value""",
-                                    (item_id, k, str(v) if v is not None else ""))
-                    con.commit()
-                    con.close()
+                try:
+                    item_dir = os.path.join(PHOTO_DIR, (category or "").lower(), str(item_id))
+                    uploaded = photo_path if (
+                        photo_path and os.path.commonpath([
+                            os.path.abspath(photo_path), os.path.abspath(item_dir)])
+                        == os.path.abspath(item_dir)) else ""
+                    meta = populate_photo_slots(item_id, category, name, detail_map, uploaded)
+                    if meta:
+                        con = sqlite3.connect(DB_PATH)
+                        cur = con.cursor()
+                        cur.execute("PRAGMA table_info(items)")
+                        cols_set = {r[1] for r in cur.fetchall()}
+                        for k, v in meta.items():
+                            if k in cols_set:
+                                cur.execute(f"UPDATE items SET {k}=? WHERE id=?",
+                                            (str(v) if v is not None else "", item_id))
+                            cur.execute("""INSERT INTO item_details(item_id, key, value)
+                                           VALUES(?,?,?)
+                                           ON CONFLICT(item_id, key) DO UPDATE SET value=excluded.value""",
+                                        (item_id, k, str(v) if v is not None else ""))
+                        con.commit()
+                        con.close()
+                finally:
+                    # clear the in-flight flag and re-render once
+                    self._img_populating.discard(item_id)
                     self.after(0, lambda: self.display_item_info(None))
             threading.Thread(target=_bg, daemon=True).start()
 
@@ -1348,7 +1363,16 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
         ext = os.path.splitext(url.split("?")[0])[1].lower()
         if ext not in (".jpg", ".jpeg", ".png", ".webp"):
             ext = ".jpg"
-        dest = os.path.join(item_dir, f"img{slot}{ext}")
+
+        # find the next unused slot/file
+        while slot <= max_slots:
+            dest = os.path.join(item_dir, f"img{slot}{ext}")
+            if not os.path.exists(dest):
+                break
+            slot += 1
+        if slot > max_slots:
+            return False
+
         ok = _download_image(url, dest)
         if ok:
             meta[f"img{slot}_path"] = dest
@@ -1366,17 +1390,18 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
             meta["upload_path"] = up_dest
         except Exception:
             pass
-        if (cat in {"toy", "fossil", "shell", "mineral"} and
-                os.path.commonpath([os.path.abspath(uploaded), os.path.abspath(item_dir)])
-                == os.path.abspath(item_dir)):
+
+        # promote the local copy to img1 if not already present
+        if cat in {"toy", "fossil", "shell", "mineral"}:
             dest_first = os.path.join(item_dir, f"img1{up_ext}")
-            try:
-                if os.path.abspath(uploaded) != os.path.abspath(dest_first):
-                    shutil.copyfile(uploaded, dest_first)
-                meta["img1_path"] = dest_first
-                meta["img1_src"] = "uploaded"
-            except Exception:
-                pass
+            if not os.path.exists(dest_first):
+                try:
+                    shutil.copyfile(up_dest, dest_first)
+                    meta["img1_path"] = dest_first
+                    meta["img1_src"] = "uploaded"
+                except Exception:
+                    pass
+            # next web save goes to slot 2
             slot = 2
 
     q_name = name or ""
