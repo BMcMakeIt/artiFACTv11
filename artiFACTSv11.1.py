@@ -822,7 +822,8 @@ def upsert_item(name: str, category: str, photo_path: str) -> int:
     row = cur.fetchone()
     if row:
         item_id = row[0]
-        cur.execute("UPDATE items SET photo_path=? WHERE id=?", (photo_path, item_id))
+        if photo_path:
+            cur.execute("UPDATE items SET photo_path=? WHERE id=?", (photo_path, item_id))
     else:
         # check if item exists under a different category (category change)
         cur.execute("SELECT id, category FROM items WHERE lower(name)=lower(?)", (name,))
@@ -835,8 +836,12 @@ def upsert_item(name: str, category: str, photo_path: str) -> int:
                 cur.execute("DELETE FROM item_details WHERE item_id=? AND key LIKE 'img%_path'", (item_id,))
                 cur.execute("DELETE FROM item_details WHERE item_id=? AND key LIKE 'img%_src'", (item_id,))
                 cur.execute("DELETE FROM item_details WHERE item_id=? AND key='upload_path'", (item_id,))
-            cur.execute("UPDATE items SET category=?, photo_path=? WHERE id=?",
-                        (category, photo_path, item_id))
+            if photo_path:
+                cur.execute("UPDATE items SET category=?, photo_path=? WHERE id=?",
+                            (category, photo_path, item_id))
+            else:
+                cur.execute("UPDATE items SET category=? WHERE id=?",
+                            (category, item_id))
         else:
             cur.execute("INSERT INTO items(name, category, photo_path) VALUES (?,?,?)",
                         (name, category, photo_path))
@@ -1207,7 +1212,12 @@ class LibraryWindow(tk.Toplevel):
 
         if any(p is None for p in paths) and item_id is not None:
             def _bg():
-                meta = populate_photo_slots(item_id, category, name, detail_map, photo_path)
+                item_dir = os.path.join(PHOTO_DIR, (category or "").lower(), str(item_id))
+                uploaded = photo_path if (
+                    photo_path and os.path.commonpath([
+                        os.path.abspath(photo_path), os.path.abspath(item_dir)])
+                    == os.path.abspath(item_dir)) else ""
+                meta = populate_photo_slots(item_id, category, name, detail_map, uploaded)
                 if meta:
                     con = sqlite3.connect(DB_PATH)
                     cur = con.cursor()
@@ -1338,14 +1348,18 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
         up_ext = os.path.splitext(uploaded)[1] or ".jpg"
         up_dest = os.path.join(item_dir, f"upload{up_ext}")
         try:
-            shutil.copyfile(uploaded, up_dest)
+            if os.path.abspath(uploaded) != os.path.abspath(up_dest):
+                shutil.copyfile(uploaded, up_dest)
             meta["upload_path"] = up_dest
         except Exception:
             pass
-        if cat in {"toy", "fossil", "shell", "mineral"}:
+        if (cat in {"toy", "fossil", "shell", "mineral"} and
+                os.path.commonpath([os.path.abspath(uploaded), os.path.abspath(item_dir)])
+                == os.path.abspath(item_dir)):
             dest_first = os.path.join(item_dir, f"img1{up_ext}")
             try:
-                shutil.copyfile(uploaded, dest_first)
+                if os.path.abspath(uploaded) != os.path.abspath(dest_first):
+                    shutil.copyfile(uploaded, dest_first)
                 meta["img1_path"] = dest_first
                 meta["img1_src"] = "uploaded"
             except Exception:
