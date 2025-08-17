@@ -1114,9 +1114,16 @@ def ddg_image_search(term: str, max_results: int = 4):
 
 
 def _download_image(url: str, dest_path: str) -> bool:
+    """Download an image to ``dest_path``.
+
+    If the URL points to Discogs, include our Discogs user agent header.
+    Returns ``True`` on success, ``False`` otherwise.
+    """
     try:
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
+        headers = {"User-Agent": _discogs_user_agent()} if "discogs.com" in (url or "") else {}
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return False
         with open(dest_path, "wb") as f:
             f.write(r.content)
         return True
@@ -1131,20 +1138,22 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
     meta = {}
 
     slot = 1
+    max_slots = PHOTO_SLOTS.get(cat, 4)
 
-    def _save(url: str):
+    def _save(url: str) -> bool:
         nonlocal slot
-        if not url:
-            slot += 1
-            return
+        if slot > max_slots or not url:
+            return False
         ext = os.path.splitext(url.split("?")[0])[1].lower()
         if ext not in (".jpg", ".jpeg", ".png", ".webp"):
             ext = ".jpg"
         dest = os.path.join(item_dir, f"img{slot}{ext}")
-        if _download_image(url, dest):
+        ok = _download_image(url, dest)
+        if ok:
             meta[f"img{slot}_path"] = dest
             meta[f"img{slot}_src"] = url
-        slot += 1
+            slot += 1
+        return ok
 
     # copy uploaded image for persistence
     if uploaded and os.path.exists(uploaded):
@@ -1173,22 +1182,29 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
         if rel_id:
             try:
                 rel = discogs_get_release(int(rel_id))
-                for im in (rel.get("images") or [])[:PHOTO_SLOTS.get("vinyl", 4)]:
+                for im in (rel.get("images") or [])[:max_slots]:
                     u = im.get("uri") or im.get("resource_url")
                     if u:
                         urls.append(u)
             except Exception:
                 urls = []
-        if not urls:
+
+        discogs_ok = []
+        for u in urls[:max_slots]:
+            discogs_ok.append(_save(u))
+
+        needed = max_slots - sum(1 for ok in discogs_ok if ok)
+        if needed > 0:
             album = details.get("release_title", "")
             artist = details.get("artist", "")
-            queries = [f"{album} – {artist}"] + [artist] * 3
+            queries = [f"{album} – {artist}"] + [artist] * (max_slots - 1)
             for q in queries:
+                if needed <= 0:
+                    break
                 q = q.strip()
                 res = ddg_image_search(_build_reference_query(cat, q), max_results=1) if q else []
-                urls.append(res[0][0] if res else "")
-        for u in urls[:PHOTO_SLOTS.get("vinyl", 4)]:
-            _save(u)
+                if _save(res[0][0] if res else ""):
+                    needed -= 1
     elif cat == "card":
         queries = [q_name, q_name, details.get("card_title", "")]
         for q in queries:
