@@ -683,6 +683,11 @@ PHOTO_SLOTS = {
     "mineral": 4,
 }
 
+LIBRARY_CATEGORIES = [
+    "mineral", "shell", "fossil", "card",
+    "vinyl", "coin", "toy", "other"
+]
+
 # ---------- DB ----------
 
 
@@ -1063,9 +1068,16 @@ class LibraryWindow(tk.Toplevel):
         left = SlateFrame(main)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
         SlateTitle(left, text='Item Catalog').pack(anchor='w', pady=(6, 4))
-        self.listbox = SlateListbox(left, width=40, height=28)
-        self.listbox.pack(fill=tk.Y, expand=True)
-        self.listbox.bind("<<ListboxSelect>>", self.display_item_info)
+        tree_style = ttk.Style()
+        tree_style.configure('Library.Treeview',
+                              background=COLORS['bg_card'],
+                              fieldbackground=COLORS['bg_card'],
+                              foreground=COLORS['fg_primary'])
+        self.tree = ttk.Treeview(
+            left, show='tree', style='Library.Treeview', selectmode='browse', height=28)
+        self.tree.tag_configure('category', font=('Segoe UI', 10, 'bold'))
+        self.tree.pack(fill=tk.Y, expand=True)
+        self.tree.bind("<<TreeviewSelect>>", self.display_item_info)
 
         right = SlateFrame(main)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -1095,25 +1107,38 @@ class LibraryWindow(tk.Toplevel):
         self.info_text.configure(yscrollcommand=info_scroll.set)
 
         self.photo_refs = []
-        self.item_rows = []
+        self.item_rows = {}
         self.load_items()
 
     def load_items(self):
-        self.listbox.delete(0, tk.END)
-        self.item_rows = []
+        for child in self.tree.get_children():
+            self.tree.delete(child)
+        self.item_rows = {}
+        for cat in LIBRARY_CATEGORIES:
+            self.tree.insert('', 'end', iid=f'cat_{cat}', text=cat.title(),
+                             open=False, tags=('category',))
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("SELECT id, name, category FROM items ORDER BY name")
         for item_id, name, category in cur.fetchall():
-            self.listbox.insert(tk.END, f"{name} ({category})")
-            self.item_rows.append((item_id, name, category))
+            cat = (category or 'other').lower()
+            if cat not in LIBRARY_CATEGORIES:
+                cat = 'other'
+            self.tree.insert(f'cat_{cat}', 'end', iid=str(item_id), text=name)
+            self.item_rows[item_id] = (item_id, name, cat)
         conn.close()
 
     def display_item_info(self, event):
-        sel = self.listbox.curselection()
+        sel = self.tree.selection()
         if not sel:
             return
-        item_id, name, category = self.item_rows[sel[0]]
+        iid = sel[0]
+        if iid.startswith('cat_'):
+            return
+        item_id = int(iid)
+        item_id, name, category = self.item_rows.get(item_id, (None, None, None))
+        if item_id is None:
+            return
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("SELECT * FROM items WHERE id = ?", (item_id,))
