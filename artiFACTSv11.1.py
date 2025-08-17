@@ -1068,47 +1068,47 @@ class LibraryWindow(tk.Toplevel):
         left = SlateFrame(main)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
         SlateTitle(left, text='Item Catalog').pack(anchor='w', pady=(6, 4))
-# --- Treeview + styling (merged) ---
-# Wrapper with scroll support
-tree_wrap = SlateFrame(left)
-tree_wrap.pack(fill=tk.BOTH, expand=True)
+        # --- Treeview + styling (merged) ---
+        # Wrapper with scroll support
+        tree_wrap = SlateFrame(left)
+        tree_wrap.pack(fill=tk.BOTH, expand=True)
 
-# Style setup (codex branch had fuller styling + theme fallback)
-tree_style = ttk.Style()
-try:
-    tree_style.theme_use('clam')
-except tk.TclError:
-    pass
+        # Style setup (codex branch had fuller styling + theme fallback)
+        tree_style = ttk.Style()
+        try:
+            tree_style.theme_use('clam')
+        except tk.TclError:
+            pass
 
-tree_style.configure(
-    'Library.Treeview',
-    background=COLORS['bg_card'],
-    fieldbackground=COLORS['bg_card'],
-    foreground=COLORS['fg_primary'],
-    bordercolor=COLORS.get('border', COLORS['bg_card']),
-    rowheight=20
-)
-tree_style.map(
-    'Library.Treeview',
-    background=[('selected', COLORS.get('accent_a', '#ccccff'))],
-    foreground=[('selected', 'black')]
-)
-tree_style.layout('Library.Treeview', [('Treeview.treearea', {'sticky': 'nswe'})])
+        tree_style.configure(
+            'Library.Treeview',
+            background=COLORS['bg_card'],
+            fieldbackground=COLORS['bg_card'],
+            foreground=COLORS['fg_primary'],
+            bordercolor=COLORS.get('border', COLORS['bg_card']),
+            rowheight=20
+        )
+        tree_style.map(
+            'Library.Treeview',
+            background=[('selected', COLORS.get('accent_a', '#ccccff'))],
+            foreground=[('selected', 'black')]
+        )
+        tree_style.layout('Library.Treeview', [('Treeview.treearea', {'sticky': 'nswe'})])
 
-# Treeview (in wrapper so the scrollbar can live beside it)
-self.tree = ttk.Treeview(
-    tree_wrap, show='tree', style='Library.Treeview', selectmode='browse', height=20
-)
-self.tree.tag_configure('category', font=('Segoe UI', 10, 'bold'))
-self.tree.pack(side='left', fill=tk.BOTH, expand=True)
+        # Treeview (in wrapper so the scrollbar can live beside it)
+        self.tree = ttk.Treeview(
+            tree_wrap, show='tree', style='Library.Treeview', selectmode='browse', height=20
+        )
+        self.tree.tag_configure('category', font=('Segoe UI', 10, 'bold'))
+        self.tree.pack(side='left', fill=tk.BOTH, expand=True)
 
-# Vertical scrollbar
-tree_scroll = tk.Scrollbar(tree_wrap, orient='vertical', command=self.tree.yview)
-tree_scroll.pack(side='right', fill='y')
-self.tree.configure(yscrollcommand=tree_scroll.set)
+        # Vertical scrollbar
+        tree_scroll = tk.Scrollbar(tree_wrap, orient='vertical', command=self.tree.yview)
+        tree_scroll.pack(side='right', fill='y')
+        self.tree.configure(yscrollcommand=tree_scroll.set)
 
-# Selection handler
-self.tree.bind("<<TreeviewSelect>>", self.display_item_info)
+        # Selection handler
+        self.tree.bind("<<TreeviewSelect>>", self.display_item_info)
 
 
         right = SlateFrame(main)
