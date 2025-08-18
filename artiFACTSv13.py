@@ -2146,6 +2146,9 @@ class ClassifierApp:
         self._rb_widgets = []
         self._last_image_path = ""
         self._chosen_label = ""
+        # Track image-search state
+        self._img_search_epoch = 0
+        self._ref_job = None
 
     def _clear_reference_images(self, msg=""):
         for w in self.ref_widgets:
@@ -2177,20 +2180,35 @@ class ClassifierApp:
             self._clear_reference_images(
                 "Install: pip install duckduckgo-search")
             return
+        # Debounce rapid selection changes
+        if self._ref_job:
+            try:
+                self.master.after_cancel(self._ref_job)
+            except Exception:
+                pass
+        self._ref_job = self.master.after(150, lambda t=term: self.load_reference_images(t))
+
+    def load_reference_images(self, term: str):
+        self._ref_job = None
         query = _build_reference_query(self.category_var.get(), term)
-        self._clear_reference_images("Searching images…")
+        self._clear_reference_images("Searching…")
+        self._img_search_epoch += 1
+        epoch = self._img_search_epoch
 
         def _work():
             results = ddg_image_search(query, max_results=4)
+            self.master.after(0, lambda: self._image_search_complete(epoch, term, results))
 
-            def _ui():
-                if results:
-                    self.ref_note.config(text=f"Results for: {term}")
-                    self._set_reference_images(results)
-                else:
-                    self._clear_reference_images("No images found.")
-            self.master.after(0, _ui)
         threading.Thread(target=_work, daemon=True).start()
+
+    def _image_search_complete(self, epoch: int, term: str, results):
+        if epoch != self._img_search_epoch:
+            return
+        if results:
+            self.ref_note.config(text=f"Results for: {term}")
+            self._set_reference_images(results)
+        else:
+            self._clear_reference_images("No images found.")
 
     def view_library(self): LibraryWindow(self.master)
 
