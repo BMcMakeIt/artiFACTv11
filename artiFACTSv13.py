@@ -233,6 +233,161 @@ def map_discogs_release_to_schema(release: dict) -> dict:
     return out
 
 
+# --- Fossil enrichment helpers ---
+
+# small ontology to infer broader fossil types from classifier labels
+FOSSIL_GENERIC_CONCEPTS = {
+    "sand dollar": "echinoid_fossil",
+    "sea biscuit": "echinoid_fossil",
+    "echinoid": "echinoid_fossil",
+    "ammonite": "ammonite_fossil",
+    "trilobite": "trilobite_fossil",
+    "shark tooth": "shark_tooth_fossil",
+    "tooth": "vertebrate_tooth_fossil",
+    "petrified wood": "petrified_wood",
+    "wood": "petrified_wood",
+    "belemnite": "belemnite_fossil",
+    "crinoid": "crinoid_fossil",
+    "brachiopod": "brachiopod_fossil",
+    "bivalve": "bivalve_fossil",
+    "gastropod": "gastropod_fossil",
+    "coral": "coral_fossil",
+    "coprolite": "coprolite_fossil",
+    "bone": "vertebrate_bone_fossil",
+    "vertebra": "vertebrate_bone_fossil",
+}
+
+# fields expected from fossil enrichment
+FOSSIL_ENRICH_KEYS = [
+    "scientific_name", "geological_period", "estimated_age", "fossil_type",
+    "preservation_mode", "size_range", "typical_locations",
+    "paleoecology", "toxicity_safety", "description", "fact"
+]
+
+
+def _json_chat(prompt: str) -> dict:
+    """Send a simple text prompt and parse JSON response."""
+    client = _openai_client()
+    resp = client.responses.create(
+        model="gpt-4o-mini",
+        input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+        temperature=0.2,
+        max_output_tokens=700,
+    )
+    text = getattr(resp, "output_text", "").strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        s, e = text.find("{"), text.rfind("}")
+        return json.loads(text[s:e+1]) if (s != -1 and e != -1 and e > s) else {}
+
+
+def guess_parent_concept(raw_label: str) -> str:
+    s = raw_label.lower()
+    for k, v in FOSSIL_GENERIC_CONCEPTS.items():
+        if k in s:
+            return v
+    return "generic_fossil"
+
+
+def make_prompt(name, label, concept=None, fill_only=None, forbid_specifics=False):
+    scope = concept or label
+    rules = [
+        f'Item name: "{name}"',
+        f'Classifier label: "{label}"',
+        f'Concept: "{scope}"',
+        "Write concise, true, widely applicable statements. 1–2 sentences per field.",
+        "Avoid formation names, mines, counties, or species unless present in the label with high confidence.",
+        "If you’re unsure, use phrasing like typically, often, commonly.",
+    ]
+    if forbid_specifics:
+        rules.append("Do NOT include exact formations, mines, counties, member names, GPS, or species.")
+    fields = ", ".join(fill_only or FOSSIL_ENRICH_KEYS)
+    return (
+        "Enrich this fossil catalog card.\n\n" +
+        "Rules:\n- " + "\n- ".join(rules) +
+        "\n\nReturn strict JSON with exactly these keys: " +
+        (fields if fill_only else ", ".join(FOSSIL_ENRICH_KEYS)) +
+        ".\nIf a field cannot be filled generically, return an empty string for that key."
+    )
+
+
+def count_filled(d: dict) -> int:
+    return sum(1 for k in FOSSIL_ENRICH_KEYS if (d.get(k) or "").strip())
+
+
+def merge_missing(dst: dict, src: dict):
+    for k in FOSSIL_ENRICH_KEYS:
+        if not (dst.get(k) or "").strip():
+            v = (src.get(k) or "").strip()
+            if v:
+                dst[k] = v
+    return dst
+
+
+def soften_certainty(s: str) -> str:
+    return (s.replace(" always ", " often ")
+              .replace(" Always ", " Often ")
+              .replace(" exactly ", " typically ")
+              .replace(" Exactly ", " Typically "))
+
+
+def postprocess_all(d: dict) -> dict:
+    for k, v in list(d.items()):
+        if isinstance(v, str) and v:
+            d[k] = soften_certainty(v)
+    return d
+
+
+LOCALITY_RE = re.compile(
+    r"\b(Formation|Fm\.|Member|Shale|Limestone|Sandstone|Mine|Quarry|Pit|County|Parish|Fm)\b",
+    flags=re.I,
+)
+
+BINOMIAL_RE = re.compile(r"\b([A-Z][a-z]+)\s([a-z]{3,})\b")
+
+SPEC_ABBR_RE = re.compile(r"\b(sp\.|cf\.|aff\.)\b", flags=re.I)
+
+
+def remove_specifics(text: str) -> str:
+    t = LOCALITY_RE.sub("marine sediments", text)
+    t = BINOMIAL_RE.sub("a related taxon", t)
+    t = SPEC_ABBR_RE.sub("", t)
+    return t
+
+
+def validate_text(card: dict, label_conf: float) -> dict:
+    safe = dict(card)
+    for k in FOSSIL_ENRICH_KEYS:
+        v = safe.get(k, "")
+        if not isinstance(v, str) or not v.strip():
+            continue
+        if label_conf < 0.7:
+            v = remove_specifics(v)
+            v = re.sub(r"\b(\d{1,3})\s*(million|mya|Ma)\b", "tens of millions of years", v, flags=re.I)
+            v = v.replace(" always ", " often ").replace(" Always ", " Often ")
+        safe[k] = v.strip()[:600]
+    return safe
+
+
+def enrich_fossil_two_pass(name: str, raw_label: str, label_conf: float = 1.0, min_fields: int = 7) -> dict:
+    p1 = make_prompt(name, raw_label, concept=None, forbid_specifics=(label_conf < 0.7))
+    r1 = _json_chat(p1)
+    out = {k: r1.get(k, "") for k in FOSSIL_ENRICH_KEYS}
+
+    if count_filled(out) >= min_fields:
+        return postprocess_all(validate_text(out, label_conf))
+
+    parent = guess_parent_concept(raw_label)
+    missing = [k for k in FOSSIL_ENRICH_KEYS if not (out.get(k) or "").strip()]
+    if missing:
+        p2 = make_prompt(name, raw_label, concept=parent, fill_only=missing, forbid_specifics=True)
+        r2 = _json_chat(p2)
+        out = merge_missing(out, r2)
+
+    return postprocess_all(validate_text(out, label_conf))
+
+
 def merge_gpt_and_discogs(gpt: dict, discogs: dict) -> dict:
     gpt = gpt or {}
     if not discogs:
@@ -1974,7 +2129,13 @@ class ItemDetailWindow(tk.Toplevel):
         def _work():
             meta, err = None, None
             try:
-                if cat in ("mineral", "shell", "fossil"):
+                if cat == "fossil":
+                    lbl, conf = "", 1.0
+                    if self.last_classification:
+                        lbl = self.last_classification.get("label", "")
+                        conf = float(self.last_classification.get("confidence", 0) or 0)
+                    meta = enrich_fossil_two_pass(name_for_prompt, lbl, conf)
+                elif cat in ("mineral", "shell"):
                     meta = enrich_generic_openai(
                         name_for_prompt, cat, self.photo_path, helpers, key_list)
                 elif cat == "vinyl":
@@ -2084,6 +2245,7 @@ class ClassifierApp:
         )
         self.category_combo.grid(
             row=1, column=1, sticky='w', padx=(0, 12), pady=6)
+        self.last_classification = None
         SlateButton(tl, text='Select Image', command=self.select_image).grid(
             row=1, column=2, padx=6)
         SlateButton(tl, text='Capture Image', command=self.capture_image).grid(
@@ -2272,6 +2434,14 @@ class ClassifierApp:
         openai_block = result.get(
             'openai', {}) if isinstance(result, dict) else {}
         oa_guesses = (openai_block.get('guesses') or [])[:3]
+        if oa_guesses:
+            top = oa_guesses[0]
+            self.last_classification = {
+                'label': top.get('label', ''),
+                'confidence': float(top.get('confidence', 0) or 0)
+            }
+        else:
+            self.last_classification = None
 
         self.result_text.config(state='normal')
         self.result_text.delete(1.0, tk.END)
