@@ -19,6 +19,72 @@ import io
 import webbrowser
 import requests
 
+import numpy as np  # if not already imported
+
+CASE_TERMS_RE = re.compile(r"\b(display\s*case|shadow\s*box|case|box|frame)\b", re.I)
+
+
+def _decontainerize_label(label: str) -> str:
+    """Remove container terms like 'display case' so guesses focus on the specimen."""
+    s = (label or "").strip()
+    if not s:
+        return s
+    cleaned = CASE_TERMS_RE.sub("", s)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" -–—:_").strip()
+    return cleaned or s
+
+
+def _decontainerize_guesses(guesses):
+    out = []
+    for g in (guesses or []):
+        g = dict(g) if isinstance(g, dict) else {}
+        g["label"] = _decontainerize_label(g.get("label", ""))
+        out.append(g)
+    return out
+
+
+def _autocrop_inside_case(src_path: str) -> str:
+    """
+    Try to crop the image to the interior of a display case/shadow box
+    so the model focuses on the specimen. Returns a temp file path, or
+    the original path if no reliable crop is found.
+    """
+    try:
+        img = cv2.imread(src_path)
+        if img is None:
+            return src_path
+        h, w = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.bilateralFilter(gray, 7, 50, 50)
+        edges = cv2.Canny(gray, 60, 160)
+        edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+        cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best = None
+        best_area = 0
+        for c in cnts:
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+            if len(approx) == 4:
+                x, y, ww, hh = cv2.boundingRect(approx)
+                area = ww * hh
+                if area > best_area and area > 0.25 * w * h:
+                    best = (x, y, ww, hh)
+                    best_area = area
+        if best:
+            x, y, ww, hh = best
+            inset = int(min(ww, hh) * 0.06)
+            x2, y2 = max(0, x + inset), max(0, y + inset)
+            x3, y3 = min(w, x + ww - inset), min(h, y + hh - inset)
+            if (x3 - x2) > 80 and (y3 - y2) > 80:
+                crop = img[y2:y3, x2:x3].copy()
+                crop = cv2.convertScaleAbs(crop, alpha=1.08, beta=6)
+                out = os.path.join(tempfile.gettempdir(), "artifacts_autocrop.jpg")
+                cv2.imwrite(out, crop)
+                return out
+        return src_path
+    except Exception:
+        return src_path
+
 
 # --- Discogs API helpers & pricing ---
 def _discogs_user_agent():
@@ -606,6 +672,12 @@ def enrich_generic_openai(name: str, category: str, photo_path: str, helpers: di
             "\n- toxicity_safety = 'non-toxic' unless specific hazards apply (e.g., dust precautions)."
             "\n- description = 1–2 plain sentences on appearance/context."
             "\n- fact = one short, verifiable tidbit."
+        )
+
+    if category.lower() in {"mineral", "shell", "fossil"}:
+        guidance += (
+            "\n- If the photo shows a display case/shadow box, ignore the container and describe only the specimen."
+            "\n- Do not call the item a 'display case' or 'shadow box'."
         )
 
     user_text = (
@@ -1460,6 +1532,7 @@ except Exception:
 
 def _build_reference_query(category: str, term: str) -> str:
     c = (category or "").lower().strip()
+    term = _decontainerize_label(term)
     t = term.strip()
     if c == "vinyl":
         return f"{t} album cover front high resolution"
@@ -2309,8 +2382,9 @@ class ClassifierApp:
                 self.master.after_cancel(self._ref_job)
             except Exception:
                 pass
+        clean = _decontainerize_label(term)
         self._ref_job = self.master.after(
-            150, lambda t=term: self.load_reference_images(t))
+            150, lambda t=clean: self.load_reference_images(t))
 
     def load_reference_images(self, term: str):
         self._ref_job = None
@@ -2372,7 +2446,8 @@ class ClassifierApp:
             tk_img = ImageTk.PhotoImage(img)
             self.image_label.config(image=tk_img, text='')
             self.image_label.image = tk_img
-            self.classify_and_display(path)
+            cropped = _autocrop_inside_case(path)
+            self.classify_and_display(cropped or path)
         except Exception as e:
             messagebox.showerror('Error', str(e))
 
@@ -2387,7 +2462,8 @@ class ClassifierApp:
             tk_img = ImageTk.PhotoImage(img)
             self.image_label.config(image=tk_img, text='')
             self.image_label.image = tk_img
-            self.classify_and_display(tmp)
+            cropped = _autocrop_inside_case(tmp)
+            self.classify_and_display(cropped or tmp)
         except Exception as e:
             messagebox.showerror('Error', str(e))
 
@@ -2397,6 +2473,7 @@ class ClassifierApp:
         openai_block = result.get(
             'openai', {}) if isinstance(result, dict) else {}
         oa_guesses = (openai_block.get('guesses') or [])[:3]
+        oa_guesses = _decontainerize_guesses(oa_guesses)
         if oa_guesses:
             top = oa_guesses[0]
             self.last_classification = {
