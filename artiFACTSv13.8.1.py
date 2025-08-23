@@ -2635,7 +2635,10 @@ class ClassifierApp:
         )
         self.category_combo.grid(
             row=1, column=1, sticky='w', padx=(0, 12), pady=6)
+        self.category_combo.bind("<<ComboboxSelected>>", self._on_category_change)
         self.last_classification = None
+        self._species_mode = False
+        self._ref_job = None
         SlateButton(tl, text='Select Image', command=self.select_image).grid(
             row=1, column=2, padx=6)
         SlateButton(tl, text='Capture Image', command=self.capture_image).grid(
@@ -2700,7 +2703,9 @@ class ClassifierApp:
         self._chosen_label = ""
         # Track image-search state
         self._img_search_epoch = 0
-        self._ref_job = None
+
+    def _on_category_change(self, event=None):
+        self._species_mode = False
 
     def _clear_reference_images(self, msg=""):
         for w in self.ref_widgets:
@@ -2737,30 +2742,32 @@ class ClassifierApp:
             pass
         return ""
 
+    def _safe_load_refs(self, term: str):
+        try:
+            if self._ref_job:
+                self.master.after_cancel(self._ref_job)
+                self._ref_job = None
+        except Exception:
+            pass
+        self._ref_job = self.master.after(50, lambda t=term: self.load_reference_images(t))
+
     def on_guess_selected(self, term: str):
         self._chosen_label = term
         if not _DDG_OK:
             self._clear_reference_images(
                 "Install: pip install duckduckgo-search")
             return
-        # Debounce rapid selection changes
-        if self._ref_job:
-            try:
-                self.master.after_cancel(self._ref_job)
-            except Exception:
-                pass
         cat = (self.category_var.get() or "").lower().strip()
         sel = (term or "").strip()
-        if cat == "zoological":
-            if _is_species_name(sel):
-                clean = sel
-            else:
-                clean = normalize_zoo_label(term)
-                if not any(w in clean for w in ["specimen","butterfly","moth","beetle","insect","bone","tooth","antler","horn","feather","skin","taxidermy"]):
-                    clean = f"{clean} specimen"
+        if cat == "zoological" and _is_species_name(sel):
+            clean = sel
+        elif cat == "zoological":
+            clean = normalize_zoo_label(sel)
+            if not any(w in clean for w in ["specimen","butterfly","moth","beetle","insect","bone","tooth","antler","horn","feather","skin","taxidermy"]):
+                clean = f"{clean} specimen"
         else:
-            clean = _decontainerize_label(term)
-        self._ref_job = self.master.after(150, lambda t=clean: self.load_reference_images(t))
+            clean = _decontainerize_label(sel)
+        self._safe_load_refs(clean)
 
     def load_reference_images(self, term: str):
         self._ref_job = None
@@ -2842,9 +2849,12 @@ class ClassifierApp:
             self.image_label.image = tk_img
             cropped = _autocrop_inside_case(path)
             self._last_image_path = cropped or path
-            if (self.category_var.get() or "").lower().strip() == "zoological":
+            cat = (self.category_var.get() or "").lower().strip()
+            if cat == "zoological":
+                self._species_mode = True
                 self.result_text.delete(1.0, tk.END)
-                self.result_text.insert(tk.END, "Finding species candidates…\n"); self.master.update_idletasks()
+                self.result_text.insert(tk.END, "Finding species candidates…\n")
+                self.master.update_idletasks()
                 label_hint = self._label_hint()
                 group_hint = _infer_zoo_group(normalize_zoo_label(label_hint))
                 def _bg_species():
@@ -2852,14 +2862,10 @@ class ClassifierApp:
                         cands = guess_species_from_image(self._last_image_path, group_hint=group_hint, max_results=5)
                     except Exception:
                         cands = []
-                    self.master.after(0, lambda: (
-                        self.result_text.delete(1.0, tk.END),
-                        self.result_text.insert(tk.END, "Top species:\n" +
-                            "\n".join(f"• {self._format_taxon_label(c)} — {c.get('rationale','')[:120]}" for c in cands) + "\n" if cands else "No species-level match.\n"),
-                        self._show_species_candidates(cands)
-                    ))
+                    self.master.after(0, lambda: self._show_species_candidates(cands))
                 threading.Thread(target=_bg_species, daemon=True).start()
                 return
+            self._species_mode = False
             self.classify_and_display(self._last_image_path)
         except Exception as e:
             messagebox.showerror('Error', str(e))
@@ -2876,12 +2882,33 @@ class ClassifierApp:
             self.image_label.config(image=tk_img, text='')
             self.image_label.image = tk_img
             cropped = _autocrop_inside_case(tmp)
-            self.classify_and_display(cropped or tmp)
+            self._last_image_path = cropped or tmp
+            cat = (self.category_var.get() or "").lower().strip()
+            if cat == "zoological":
+                self._species_mode = True
+                self.result_text.delete(1.0, tk.END)
+                self.result_text.insert(tk.END, "Finding species candidates…\n")
+                self.master.update_idletasks()
+                label_hint = self._label_hint()
+                group_hint = _infer_zoo_group(normalize_zoo_label(label_hint))
+                def _bg_species():
+                    try:
+                        cands = guess_species_from_image(self._last_image_path, group_hint=group_hint, max_results=5)
+                    except Exception:
+                        cands = []
+                    self.master.after(0, lambda: self._show_species_candidates(cands))
+                threading.Thread(target=_bg_species, daemon=True).start()
+                return
+            self._species_mode = False
+            self.classify_and_display(self._last_image_path)
         except Exception as e:
             messagebox.showerror('Error', str(e))
 
     def classify_and_display(self, image_path: str):
-        cat = self.category_var.get().strip().lower() or 'other'
+        cat = (self.category_var.get() or "").strip().lower()
+        if cat == "zoological" and self._species_mode:
+            return
+        cat = cat or 'other'
         result = vc.classify_image(image_path, cat)
         openai_block = result.get(
             'openai', {}) if isinstance(result, dict) else {}
@@ -2964,21 +2991,38 @@ class ClassifierApp:
         return " ".join([b for b in bits if b]).strip()
 
     def _show_species_candidates(self, cands: list):
-        cands = [c for c in (cands or []) if _is_species_name(c.get("scientific_name", ""))]
+        # species-only filter (if helper exists)
+        try:
+            cands = [c for c in (cands or []) if _is_species_name(c.get("scientific_name",""))]
+        except Exception:
+            cands = (cands or [])
+        # clear radios
         for w in getattr(self, "_rb_widgets", []):
-            try:
-                w.destroy()
-            except Exception:
-                pass
+            try: w.destroy()
+            except Exception: pass
         self._rb_widgets = []
         self._chosen_label = ""
-        var = tk.StringVar(value="")
-        self._rb_var = var
 
+        # render the same list into the text box (so radios == text pane)
+        self.result_text.delete(1.0, tk.END)
+        if cands:
+            self.result_text.insert(
+                tk.END,
+                "Top species:\n" + "\n".join(
+                    f"• {self._format_taxon_label(c)} — {c.get('rationale','')[:140]}"
+                    for c in cands
+                ) + "\n"
+            )
+        else:
+            self.result_text.insert(tk.END, "No species-level match. Try a closer, glare-free photo.\n")
+
+        var = tk.StringVar(value="")
         def _select(val, cand):
             self._chosen_label = val
-            self.on_guess_selected(val)
-            self.last_classification = {"label": val, "confidence": cand.get("confidence", 0)}
+            # set last_classification used by Review & Save
+            self.last_classification = {"label": val, "confidence": cand.get("confidence",0)}
+            # species names should pass through unchanged to reference images
+            self._safe_load_refs(val)
 
         for i, cand in enumerate(cands[:5]):
             label = self._format_taxon_label(cand)
@@ -2987,16 +3031,16 @@ class ClassifierApp:
                 command=lambda v=label, c=cand: _select(v, c),
                 bg=COLORS['bg_panel'], fg=COLORS['fg_primary'],
                 selectcolor=COLORS['accent_a'],
-                activebackground=COLORS['bg_panel'], activeforeground=COLORS['fg_primary'])
+                activebackground=COLORS['bg_panel'], activeforeground=COLORS['fg_primary']
+            )
             rb.grid(row=i, column=0, sticky="w", padx=4, pady=2)
             self._rb_widgets.append(rb)
+
+        # auto-select first species to keep refs in sync
         if cands:
-            first = self._format_taxon_label(cands[0])
-            var.set(first)
-            _select(first, cands[0])
-        else:
-            self.result_text.delete(1.0, tk.END)
-            self.result_text.insert(tk.END, "No species-level match. Try a closer, glare-free photo.\n")
+            first_label = self._format_taxon_label(cands[0])
+            var.set(first_label)
+            _select(first_label, cands[0])
 
     def open_detail_window(self):
         chosen = (self._chosen_label or "").strip()
