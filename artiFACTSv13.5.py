@@ -8,6 +8,7 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 import sqlite3
 import cv2
+import numpy as np
 import os
 import shutil
 import glob
@@ -2164,6 +2165,81 @@ class ItemDetailWindow(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("DB error", str(e))
 
+# --- Display-case autocropper ---
+
+
+def _order_quad(pts):
+    # pts: 4x2
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]   # top-left
+    rect[2] = pts[np.argmax(s)]   # bottom-right
+    d = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(d)]   # top-right
+    rect[3] = pts[np.argmax(d)]   # bottom-left
+    return rect
+
+
+def _four_point_warp(image, pts):
+    rect = _order_quad(pts)
+    (tl, tr, br, bl) = rect
+    wA = np.linalg.norm(br - bl)
+    wB = np.linalg.norm(tr - tl)
+    hA = np.linalg.norm(tr - br)
+    hB = np.linalg.norm(tl - bl)
+    maxW = int(max(wA, wB))
+    maxH = int(max(hA, hB))
+    maxW = max(100, min(maxW, 4096))
+    maxH = max(100, min(maxH, 4096))
+    dst = np.array([[0, 0], [maxW - 1, 0], [maxW - 1, maxH - 1], [0, maxH - 1]], dtype="float32")
+    M = cv2.getPerspectiveTransform(rect, dst)
+    return cv2.warpPerspective(image, M, (maxW, maxH))
+
+
+def autocrop_display_case(src_path: str) -> str:
+    """
+    Detect a large rectangular 'frame' (shadow box / case) and crop/warp its interior.
+    Returns path to a temp cropped image, or "" if no confident crop found.
+    """
+    try:
+        img = cv2.imread(src_path)
+        if img is None:
+            return ""
+        h, w = img.shape[:2]
+        scale = 1280.0 / max(w, h) if max(w, h) > 1280 else 1.0
+        small = cv2.resize(img, (int(w*scale), int(h*scale)))
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        gray = cv2.bilateralFilter(gray, 9, 75, 75)  # edge-preserving
+        edges = cv2.Canny(gray, 50, 150)
+        kernel = np.ones((3, 3), np.uint8)
+        edges = cv2.dilate(edges, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best, best_area = None, 0
+        img_area = small.shape[0] * small.shape[1]
+        for c in contours:
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+            if len(approx) != 4:
+                continue
+            area = cv2.contourArea(approx)
+            if area < 0.2 * img_area:
+                continue
+            if area > best_area:
+                best, best_area = approx, area
+        if best is None:
+            return ""
+        pts = (best.reshape(4, 2) / scale).astype("float32")
+        warped = _four_point_warp(img, pts)
+        fd, tmp = tempfile.mkstemp(prefix="artifacts_crop_", suffix=".jpg")
+        os.close(fd)
+        if not cv2.imwrite(tmp, warped):
+            return ""
+        return tmp
+    except Exception:
+        return ""
+
+
 # ---------- Classifier App (pass-in root) ----------
 
 
@@ -2213,6 +2289,12 @@ class ClassifierApp:
             row=1, column=3, padx=6)
         SlateButton(tl, text='View Library', command=self.view_library).grid(
             row=1, column=4, padx=6)
+        self.autocrop_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            tl, text='Auto-crop case', variable=self.autocrop_var,
+            bg=COLORS['bg_panel'], fg=COLORS['fg_primary'],
+            selectcolor=COLORS['accent_b'], activebackground=COLORS['bg_panel']
+        ).grid(row=2, column=0, columnspan=2, sticky='w', padx=(8, 4), pady=6)
 
         # Selected image
         tr = SlateFrame(main)
@@ -2392,8 +2474,20 @@ class ClassifierApp:
             messagebox.showerror('Error', str(e))
 
     def classify_and_display(self, image_path: str):
+        use_path = image_path
+        if getattr(self, 'autocrop_var', None) and self.autocrop_var.get():
+            crop = autocrop_display_case(image_path)
+            if crop:
+                use_path = crop
+                try:
+                    img = Image.open(crop).resize((300, 300))
+                    tk_img = ImageTk.PhotoImage(img)
+                    self.image_label.config(image=tk_img, text='')
+                    self.image_label.image = tk_img
+                except Exception:
+                    pass
         cat = self.category_var.get().strip().lower() or 'other'
-        result = vc.classify_image(image_path, cat)
+        result = vc.classify_image(use_path, cat)
         openai_block = result.get(
             'openai', {}) if isinstance(result, dict) else {}
         oa_guesses = (openai_block.get('guesses') or [])[:3]
@@ -2421,7 +2515,7 @@ class ClassifierApp:
             self.result_text.insert(tk.END, "  (no guesses)\n")
         self.result_text.config(state='disabled')
 
-        self._last_image_path = image_path
+        self._last_image_path = use_path
         self._refresh_guess_radios(oa_guesses)
 
     def _refresh_guess_radios(self, guesses):
