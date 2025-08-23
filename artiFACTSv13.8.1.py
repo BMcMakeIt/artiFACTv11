@@ -150,6 +150,41 @@ def _autocrop_inside_case(src_path: str) -> str:
         return src_path
 
 
+# --- Foreground isolation helper ---
+
+
+def isolate_specimen_grabcut(src_path: str) -> str:
+    """
+    Use GrabCut to isolate foreground specimen and return a temp PNG with alpha.
+    Falls back to original on error.
+    """
+    try:
+        img = cv2.imread(src_path)
+        if img is None:
+            return src_path
+        h, w = img.shape[:2]
+        rect = (int(0.08 * w), int(0.08 * h), int(0.84 * w), int(0.84 * h))
+        mask = np.zeros((h, w), np.uint8)
+        bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
+        cv2.grabCut(img, mask, rect, bgd, fgd, 5, cv2.GC_INIT_WITH_RECT)
+        mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype("uint8")
+        fg = img * mask2[:, :, None]
+        ys, xs = np.where(mask2 > 0)
+        if len(xs) < 100 or len(ys) < 100:
+            return src_path
+        x1, x2 = xs.min(), xs.max()
+        y1, y2 = ys.min(), ys.max()
+        crop = fg[y1 : y2 + 1, x1 : x2 + 1]
+        alpha = (mask2[y1 : y2 + 1, x1 : x2 + 1] * 255).astype(np.uint8)
+        rgba = cv2.cvtColor(crop, cv2.COLOR_BGR2BGRA)
+        rgba[:, :, 3] = alpha
+        out = os.path.join(tempfile.gettempdir(), "artifacts_fg.png")
+        cv2.imwrite(out, rgba)
+        return out
+    except Exception:
+        return src_path
+
+
 # --- Discogs API helpers & pricing ---
 def _discogs_user_agent():
     return "artiFACTS/1.0 (+local)"
@@ -483,118 +518,120 @@ def _json_chat(prompt: str) -> dict:
         return json.loads(text[s:e+1]) if (s != -1 and e != -1 and e > s) else {}
 
 
-def guess_species_from_image(photo_path: str, group_hint: str = "insect", max_results: int = 5):
+# --- Insect family pre-pass ---
+
+
+INSECT_FAMILIES = [
+    "Cerambycidae (longhorn beetles)",
+    "Scarabaeidae (scarab beetles)",
+    "Buprestidae (jewel beetles)",
+    "Nymphalidae (brush-footed butterflies)",
+    "Papilionidae (swallowtails)",
+    "Pieridae (whites and sulphurs)",
+    "Sphingidae (hawk moths)",
+    "Noctuidae (owlet moths)",
+    "Saturniidae (silk moths)"
+]
+
+
+def guess_insect_family(photo_path: str) -> dict:
     """
-    Return up to N SPECIES-level candidates from the photo.
-    For osteo items: include bone/tooth element in rationale; still return species.
-    Output list items have: scientific_name, common_name, rank ('species' or 'subspecies'),
-    family, genus, confidence (0..1), rationale, and optional element (for bone/tooth).
+    Return {'family':'Cerambycidae','confidence':0.0-1.0,'rationale':...}
     """
     da = _img_to_data_url(photo_path) if photo_path and os.path.exists(photo_path) else ""
     if not da:
-        return []
-
-    if group_hint in ("bone", "tooth", "antler"):
-        system = (
-            "You are a museum osteology curator. Identify the species from the photo, "
-            "and note the skeletal element (e.g., canine tooth, rib, femur, metacarpal) if visible. "
-            "Return ONLY species-level names (or subspecies). No genus-only or family-only results."
-        )
-        extra_rule = "Each item MUST be species or subspecies. Include an 'element' string for bone/tooth if deducible."
-    else:
-        system = (
-            "You are a museum entomology/ornithology curator. Identify the organism to SPECIES (or subspecies) "
-            "using visible traits. Return ONLY species-level names. No generic outputs."
-        )
-        extra_rule = "Each item MUST be species or subspecies."
-
+        return {}
+    system = "You are a museum entomology curator. Choose the single best insect FAMILY from a fixed list."
     user = (
-        f"Group hint: {group_hint}\n"
-        "Return a compact JSON array (no prose). Schema for each item:\n"
-        '{"scientific_name":"","common_name":"","rank":"","family":"","genus":"","confidence":0.0,"rationale":"","element":""}\n'
-        f"{extra_rule}\n"
-        f"Limit to {max_results}. Confidence is 0..1. If uncertain, still provide the single best species guess with lower confidence."
+        "Pick ONE family from this list that best matches the specimen:\n"
+        + "; ".join(INSECT_FAMILIES)
+        + "\nReturn ONLY JSON: {\"family\":\"\",\"confidence\":0.0,\"rationale\":\"\"}"
     )
-
     resp = _openai_client().responses.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         input=[
-            {"role": "system", "content":[{"type":"input_text","text":system}]},
-            {"role": "user", "content":[
-                {"type":"input_text","text":user},
-                {"type":"input_image","image_url":da}
-            ]}
+            {"role": "system", "content": [{"type": "input_text", "text": system}]},
+            {"role": "user", "content": [
+                {"type": "input_text", "text": user},
+                {"type": "input_image", "image_url": da},
+            ]},
         ],
-        temperature=0.1, max_output_tokens=700
+        temperature=0.0,
+        max_output_tokens=300,
     )
     txt = getattr(resp, "output_text", "").strip()
-    # parse robustly
+    try:
+        data = json.loads(txt)
+    except Exception:
+        s, e = txt.find("{"), txt.rfind("}")
+        data = json.loads(txt[s:e+1]) if (s != -1 and e != -1 and e > s) else {}
+    fam = (data.get("family") or "").strip()
+    conf = float(data.get("confidence") or 0.0)
+    rat = (data.get("rationale") or "").strip()
+    if "(" in fam:
+        fam = fam.split("(")[0].strip()
+    return {"family": fam, "confidence": max(0.0, min(1.0, conf)), "rationale": rat}
+
+
+def guess_species_from_image(photo_path: str, family_hint: str = "", max_results: int = 5):
+    """
+    Return SPECIES-level candidates restricted to family_hint (if provided).
+    Uses gpt-4o and the isolated specimen image if available.
+    """
+    iso = isolate_specimen_grabcut(photo_path)
+    da = _img_to_data_url(iso) if iso and os.path.exists(iso) else _img_to_data_url(photo_path)
+    if not da:
+        return []
+
+    fam_clause = f"Restrict candidates to family: {family_hint}." if family_hint else "If identifiable, also state the likely family."
+    system = (
+        "You are a museum taxonomist. Identify the organism in the photo to SPECIES (or subspecies). "
+        "Return ONLY species-level names (Genus species). No generic outputs."
+    )
+    user = (
+        f"{fam_clause}\n"
+        "Return ONLY a JSON array (no prose). Each item must be:\n"
+        '{"scientific_name":"","common_name":"","family":"","genus":"","rank":"species","confidence":0.0,"rationale":""}\n'
+        f"Limit to {max_results}. Confidence 0..1. If uncertain, provide your single best species with lower confidence."
+    )
+    resp = _openai_client().responses.create(
+        model="gpt-4o",
+        input=[
+            {"role": "system", "content": [{"type": "input_text", "text": system}]},
+            {"role": "user", "content": [
+                {"type": "input_text", "text": user},
+                {"type": "input_image", "image_url": da},
+            ]},
+        ],
+        temperature=0.0,
+        max_output_tokens=700,
+    )
+    txt = getattr(resp, "output_text", "").strip()
     try:
         arr = json.loads(txt)
     except Exception:
         s, e = txt.find("["), txt.rfind("]")
-        arr = json.loads(txt[s:e+1]) if (s!=-1 and e!=-1 and e>s) else []
+        arr = json.loads(txt[s:e+1]) if (s != -1 and e != -1 and e > s) else []
 
-    # keep ONLY species/subspecies; sanitize and sort
+    SPECIES_RE = re.compile(r"^[A-Z][a-z]+(?:\s[a-z\-]+){1,2}$")
     out = []
     for it in (arr if isinstance(arr, list) else []):
         sci = (it.get("scientific_name") or "").strip()
-        if not _is_species_name(sci):
-            continue  # species-only policy
-        rank = (it.get("rank") or "").strip().lower()
-        if rank not in ("species", "subspecies", ""):
+        if not SPECIES_RE.match(sci):
             continue
         conf = float(it.get("confidence") or 0)
-        out.append({
-            "scientific_name": sci,
-            "common_name": (it.get("common_name") or "").strip(),
-            "family": (it.get("family") or "").strip(),
-            "genus": (it.get("genus") or "").strip(),
-            "rank": "subspecies" if " " in sci and rank=="subspecies" else "species",
-            "confidence": max(0.0, min(1.0, conf)),
-            "rationale": (it.get("rationale") or "").strip(),
-            "element": (it.get("element") or "").strip()
-        })
+        out.append(
+            {
+                "scientific_name": sci,
+                "common_name": (it.get("common_name") or "").strip(),
+                "family": (it.get("family") or family_hint or "").strip(),
+                "genus": (it.get("genus") or "").strip(),
+                "rank": "species",
+                "confidence": max(0.0, min(1.0, conf)),
+                "rationale": (it.get("rationale") or "").strip(),
+            }
+        )
     out.sort(key=lambda d: d["confidence"], reverse=True)
-    # if model failed to give species, try a tiny fallback: ask once more with stricter instruction
-    if not out:
-        # one strict retry
-        strict = (
-            "Return ONLY a JSON array of species (or subspecies). Use the strict schema above. "
-            "Do not output genus-only or generic terms."
-        )
-        resp2 = _openai_client().responses.create(
-            model="gpt-4o-mini",
-            input=[
-                {"role":"system","content":[{"type":"input_text","text":system}]},
-                {"role":"user","content":[
-                    {"type":"input_text","text":user + "\n" + strict},
-                    {"type":"input_image","image_url":da}
-                ]}
-            ],
-            temperature=0.0, max_output_tokens=500
-        )
-        txt2 = getattr(resp2, "output_text", "").strip()
-        try:
-            arr2 = json.loads(txt2)
-        except Exception:
-            s, e = txt2.find("["), txt2.rfind("]")
-            arr2 = json.loads(txt2[s:e+1]) if (s!=-1 and e!=-1 and e>s) else []
-        for it in (arr2 if isinstance(arr2, list) else []):
-            sci = (it.get("scientific_name") or "").strip()
-            if _is_species_name(sci):
-                conf = float(it.get("confidence") or 0)
-                out.append({
-                    "scientific_name": sci,
-                    "common_name": (it.get("common_name") or "").strip(),
-                    "family": (it.get("family") or "").strip(),
-                    "genus": (it.get("genus") or "").strip(),
-                    "rank": "species",
-                    "confidence": max(0.0, min(1.0, conf)),
-                    "rationale": (it.get("rationale") or "").strip(),
-                    "element": (it.get("element") or "").strip()
-                })
-        out.sort(key=lambda d: d["confidence"], reverse=True)
     return out[:max_results]
 
 
@@ -2855,11 +2892,13 @@ class ClassifierApp:
                 self.result_text.delete(1.0, tk.END)
                 self.result_text.insert(tk.END, "Finding species candidates…\n")
                 self.master.update_idletasks()
-                label_hint = self._label_hint()
-                group_hint = _infer_zoo_group(normalize_zoo_label(label_hint))
                 def _bg_species():
                     try:
-                        cands = guess_species_from_image(self._last_image_path, group_hint=group_hint, max_results=5)
+                        fam = guess_insect_family(self._last_image_path)
+                        fam_name = fam.get("family", "")
+                        cands = guess_species_from_image(self._last_image_path, family_hint=fam_name, max_results=5)
+                        if fam_name:
+                            self.master.after(0, lambda: self.result_text.insert(tk.END, f"Family guess: {fam_name} [{int(fam.get('confidence',0)*100)}%]\n"))
                     except Exception:
                         cands = []
                     self.master.after(0, lambda: self._show_species_candidates(cands))
@@ -2889,11 +2928,13 @@ class ClassifierApp:
                 self.result_text.delete(1.0, tk.END)
                 self.result_text.insert(tk.END, "Finding species candidates…\n")
                 self.master.update_idletasks()
-                label_hint = self._label_hint()
-                group_hint = _infer_zoo_group(normalize_zoo_label(label_hint))
                 def _bg_species():
                     try:
-                        cands = guess_species_from_image(self._last_image_path, group_hint=group_hint, max_results=5)
+                        fam = guess_insect_family(self._last_image_path)
+                        fam_name = fam.get("family", "")
+                        cands = guess_species_from_image(self._last_image_path, family_hint=fam_name, max_results=5)
+                        if fam_name:
+                            self.master.after(0, lambda: self.result_text.insert(tk.END, f"Family guess: {fam_name} [{int(fam.get('confidence',0)*100)}%]\n"))
                     except Exception:
                         cands = []
                     self.master.after(0, lambda: self._show_species_candidates(cands))
