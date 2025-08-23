@@ -2606,7 +2606,25 @@ class ClassifierApp:
 
     def load_reference_images(self, term: str):
         self._ref_job = None
-        query = _build_reference_query(self.category_var.get(), term)
+        cat = (self.category_var.get() or "").lower().strip()
+        search_term = term
+        if cat == "zoological":
+            norm = normalize_zoo_label(term)
+            generic_terms = {
+                "zoological specimen", "insect specimen", "butterfly specimen",
+                "beetle specimen", "moth specimen", "insect", "butterfly",
+                "beetle", "moth"
+            }
+            if not norm or "specimen" in norm or norm in generic_terms:
+                try:
+                    meta = enrich_zoological_two_pass(norm or "zoological specimen",
+                                                     norm, self.photo_path)
+                    species = meta.get("scientific_name") or meta.get("organism")
+                    if species:
+                        search_term = species
+                except Exception:
+                    pass
+        query = _build_reference_query(cat, search_term)
         self._clear_reference_images("Searching…")
         self._img_search_epoch += 1
         epoch = self._img_search_epoch
@@ -2614,7 +2632,7 @@ class ClassifierApp:
         def _work():
             results = ddg_image_search(query, max_results=4)
             self.master.after(
-                0, lambda: self._image_search_complete(epoch, term, results))
+                0, lambda: self._image_search_complete(epoch, search_term, results))
 
         threading.Thread(target=_work, daemon=True).start()
 
