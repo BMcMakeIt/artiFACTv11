@@ -34,6 +34,36 @@ def _decontainerize_label(label: str) -> str:
     return cleaned or s
 
 
+ZOO_FALLBACK_MAP = {
+    # container-y → organism-centric
+    "framed insect specimen": "insect specimen",
+    "entomology display": "insect specimen",
+    "decorative butterfly display": "butterfly specimen",
+    "framed butterfly specimen": "butterfly specimen",
+    "framed beetle specimen": "beetle specimen",
+    "butterfly display": "butterfly specimen",
+    "beetle display": "beetle specimen",
+    "mounted insect": "insect specimen",
+    "mounted butterfly": "butterfly specimen",
+    "mounted beetle": "beetle specimen",
+    "shadow box": "insect specimen",
+    "display case": "zoological specimen",
+    "decorative art piece": "zoological specimen",
+}
+
+
+def normalize_zoo_label(raw_label: str) -> str:
+    s = (raw_label or "").lower().strip()
+    if not s:
+        return raw_label
+    # strip container words first, then map
+    s = _decontainerize_label(s)
+    for k, v in ZOO_FALLBACK_MAP.items():
+        if k in s:
+            return v
+    return s or raw_label
+
+
 def _decontainerize_guesses(guesses):
     out = []
     for g in (guesses or []):
@@ -510,10 +540,12 @@ def _zoo_make_prompt(name, label, concept=None, fill_only=None):
         f'Item name: "{name}"',
         f'Classifier label: "{label}"',
         f'Concept: "{scope}"',
+        "Describe the preserved organism (insect, beetle, butterfly, moth, bone, tooth, antler/horn, feather, skin/taxidermy). Ignore frames/cases.",
+        "Use safe taxonomy: give Genus species only if confident; otherwise provide order/family.",
+        "size_range refers to the specimen, not the container.",
+        "identification_tips must reference visible features of the organism (wing pattern, elytra, antennae, tooth shape, etc.).",
         "Return concise, widely applicable statements (1–2 sentences per field).",
-        "Describe the preserved organism; ignore the container/frame.",
-        "Prefer safe taxonomy: give Genus species only if confident; otherwise provide order/family.",
-        "Use plain strings; if uncertain, leave the field blank.",
+        "If uncertain, leave the field empty rather than guessing."
     ]
     return (
         "Enrich this zoological catalog card.\n\nRules:\n- " +
@@ -524,35 +556,31 @@ def _zoo_make_prompt(name, label, concept=None, fill_only=None):
 
 
 def enrich_zoological_two_pass(name: str, raw_label: str, label_conf: float = 1.0, min_fields: int = 7) -> dict:
-    # Pass 1: try with the raw label
-    p1 = _zoo_make_prompt(name, raw_label)
+    label_norm = normalize_zoo_label(raw_label)
+
+    # Pass 1: try with the normalized label
+    p1 = _zoo_make_prompt(name, label_norm)
     r1 = _json_chat(p1) or {}
     out = {k: r1.get(k, "") for k in ZOO_ENRICH_KEYS}
 
-    # Enough? return
     def _filled(d): return sum(1 for k in ZOO_ENRICH_KEYS if (d.get(k) or "").strip())
     if _filled(out) >= min_fields:
         return out
 
-    # Pass 2: back off to parent concept derived from tiny ontology
-    parent = _zoo_guess_parent(raw_label)
+    # Pass 2: parent concept fallback derived from normalized label
+    parent = _zoo_guess_parent(label_norm)
     missing = [k for k in ZOO_ENRICH_KEYS if not (out.get(k) or "").strip()]
     if missing:
-        p2 = _zoo_make_prompt(name, raw_label, concept=parent, fill_only=missing)
+        p2 = _zoo_make_prompt(name, label_norm, concept=parent, fill_only=missing)
         r2 = _json_chat(p2) or {}
         for k in missing:
             v = (r2.get(k) or "").strip()
             if v:
                 out[k] = v
 
-    # Light postprocess: normalize absolutes
     for k, v in list(out.items()):
         if isinstance(v, str) and v:
-            out[k] = (
-                v.replace(" always ", " often ")
-                 .replace(" Always ", " Often ")
-                 .strip()
-            )[:600]
+            out[k] = v.replace(" always ", " often ").replace(" Always ", " Often ").strip()[:600]
     return out
 
 
@@ -1648,7 +1676,7 @@ def _build_reference_query(category: str, term: str) -> str:
     if c == "mineral":
         return f"{t} mineral specimen macro"
     if c == "zoological":
-        # Encourage taxonomy-forward image results
+        # Push toward taxonomy-forward images
         return f"{t} specimen dorsal"
     return t
 
@@ -2489,14 +2517,12 @@ class ClassifierApp:
                 self.master.after_cancel(self._ref_job)
             except Exception:
                 pass
-        clean = _decontainerize_label(term)
-        if not any(word in clean.lower() for word in [
-            "specimen", "insect", "butterfly", "moth", "beetle",
-            "bone", "tooth", "antler", "feather", "skin",
-            "taxidermy"]):
-            clean = f"{clean} specimen"
-        self._ref_job = self.master.after(
-            150, lambda t=clean: self.load_reference_images(t))
+        clean = normalize_zoo_label(term) if (self.category_var.get() or "").lower().strip() == "zoological" else _decontainerize_label(term)
+        if (self.category_var.get() or "").lower().strip() == "zoological":
+            # Bias search toward organism views
+            if not any(w in clean for w in ["specimen","butterfly","moth","beetle","insect","bone","tooth","antler","horn","feather","skin","taxidermy"]):
+                clean = f"{clean} specimen"
+        self._ref_job = self.master.after(150, lambda t=clean: self.load_reference_images(t))
 
     def load_reference_images(self, term: str):
         self._ref_job = None
