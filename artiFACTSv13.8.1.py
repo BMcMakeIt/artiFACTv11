@@ -2726,6 +2726,17 @@ class ClassifierApp:
             except Exception:
                 self.ref_widgets[i].config(text="(failed)")
 
+    def _label_hint(self) -> str:
+        """Return the best current label hint for species guessing."""
+        try:
+            if getattr(self, "last_classification", None):
+                lab = (self.last_classification.get("label") or "").strip()
+                if lab:
+                    return lab
+        except Exception:
+            pass
+        return ""
+
     def on_guess_selected(self, term: str):
         self._chosen_label = term
         if not _DDG_OK:
@@ -2834,7 +2845,7 @@ class ClassifierApp:
             if (self.category_var.get() or "").lower().strip() == "zoological":
                 self.result_text.delete(1.0, tk.END)
                 self.result_text.insert(tk.END, "Finding species candidates…\n"); self.master.update_idletasks()
-                label_hint = (self.choice_var.get() or (self.last_classification.get("label", "") if getattr(self, "last_classification", None) else "") or "")
+                label_hint = self._label_hint()
                 group_hint = _infer_zoo_group(normalize_zoo_label(label_hint))
                 def _bg_species():
                     try:
@@ -2923,12 +2934,12 @@ class ClassifierApp:
             except Exception:
                 pass
         self._rb_widgets = []
-        self.choice_var = getattr(self, "choice_var", tk.StringVar(value=""))
-        self.choice_var.set("")
+        var = tk.StringVar(value="")
+        self._rb_var = var
         for i, g in enumerate(guesses[:3], 1):
             label = g.get("label", f"Option {i}")
             rb = tk.Radiobutton(
-                self.rb_frame, text=label, value=label, variable=self.choice_var,
+                self.rb_frame, text=label, value=label, variable=var,
                 command=lambda val=label: self.on_guess_selected(val),
                 bg=COLORS['bg_panel'], fg=COLORS['fg_primary'],
                 selectcolor=COLORS['accent_b'], activebackground=COLORS['bg_panel'],
@@ -2962,7 +2973,7 @@ class ClassifierApp:
         self._rb_widgets = []
         self._chosen_label = ""
         var = tk.StringVar(value="")
-        self.choice_var = var
+        self._rb_var = var
 
         def _select(val, cand):
             self._chosen_label = val
@@ -2988,7 +2999,7 @@ class ClassifierApp:
             self.result_text.insert(tk.END, "No species-level match. Try a closer, glare-free photo.\n")
 
     def open_detail_window(self):
-        chosen = (self.choice_var.get() or "").strip()
+        chosen = (self._chosen_label or "").strip()
         if not chosen:
             messagebox.showinfo(
                 "Pick one", "Please select one of the guesses first.")
