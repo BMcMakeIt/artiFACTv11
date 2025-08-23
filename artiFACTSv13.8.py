@@ -665,16 +665,22 @@ def enrich_generic_openai(name: str, category: str, photo_path: str, helpers: di
     elif category.lower() == "zoological":
         guidance = (
             "\nField guidance for zoological specimens:"
-            "\n- specimen_type = one of: insect, bone, tooth, antler/horn, feather, skin/taxidermy, other."
-            "\n- taxonomic_rank = safest confident level (e.g., Order or Family) if species is uncertain."
-            "\n- identification_tips = 1–2 cues visible to a non-expert."
-            "\n- care_preservation = short handling/storage tips (avoid UV/humidity/pests)."
-            "\n- toxicity_safety = 'non-toxic' unless specific hazards apply (e.g., dust precautions)."
-            "\n- description = 1–2 plain sentences on appearance/context."
-            "\n- fact = one short, verifiable tidbit."
+            "\n- Focus on the preserved organism itself (insect, bone, tooth, feather, antler, skin, etc.), not its container or frame."
+            "\n- scientific_name = Genus species if visible/known; otherwise give the safest higher rank (order/family)."
+            "\n- specimen_type = broad type (e.g., insect, butterfly, beetle, bone, tooth, feather, skin/taxidermy)."
+            "\n- common_name = simple descriptive name (e.g., butterfly, scarab beetle, deer antler)."
+            "\n- taxonomic_rank = the safest confident rank; prefer order/family if species is unclear."
+            "\n- size_range = dimensions of the specimen itself (not the case)."
+            "\n- identification_tips = 1–2 cues about the specimen’s visible features (wing patterns, tooth shape, bone morphology)."
+            "\n- material = keratin, chitin, bone (hydroxyapatite), etc., depending on the specimen."
+            "\n- care_preservation = tips on caring for the specimen (avoid UV, humidity, pests)."
+            "\n- toxicity_safety = 'non-toxic' unless known hazards exist (e.g., dust precautions)."
+            "\n- description = 1–2 sentences about the organism itself, ignoring its container."
+            "\n- fact = one short, verifiable fact about that type of specimen."
+            "\n- Ignore frames, boxes, cases, and presentation styles—they are irrelevant to the scientific specimen."
         )
 
-    if category.lower() in {"mineral", "shell", "fossil"}:
+    if category.lower() in {"mineral", "shell", "fossil", "zoological"}:
         guidance += (
             "\n- If the photo shows a display case/shadow box, ignore the container and describe only the specimen."
             "\n- Do not call the item a 'display case' or 'shadow box'."
@@ -2383,6 +2389,11 @@ class ClassifierApp:
             except Exception:
                 pass
         clean = _decontainerize_label(term)
+        if not any(word in clean.lower() for word in [
+            "specimen", "insect", "butterfly", "moth", "beetle",
+            "bone", "tooth", "antler", "feather", "skin",
+            "taxidermy"]):
+            clean = f"{clean} specimen"
         self._ref_job = self.master.after(
             150, lambda t=clean: self.load_reference_images(t))
 
@@ -2474,6 +2485,16 @@ class ClassifierApp:
             'openai', {}) if isinstance(result, dict) else {}
         oa_guesses = (openai_block.get('guesses') or [])[:3]
         oa_guesses = _decontainerize_guesses(oa_guesses)
+        preferred = []
+        for g in oa_guesses:
+            lbl = g.get("label", "").lower()
+            if any(k in lbl for k in [
+                "specimen", "butterfly", "moth", "insect", "beetle",
+                "antler", "bone", "tooth", "feather", "fossil"]):
+                preferred.insert(0, g)
+            else:
+                preferred.append(g)
+        oa_guesses = preferred
         if oa_guesses:
             top = oa_guesses[0]
             self.last_classification = {
