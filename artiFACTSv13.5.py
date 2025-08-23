@@ -1041,7 +1041,7 @@ SCHEMAS = {
     "shell": {
         "user": ["name", "collected_date", "provenance", "purchase_price", "storage_or_display_location", "notes"],
         "api": [
-            "scientific_name", "category", "subcategory", "material",
+            "scientific_name", "subcategory", "material",
             "common_uses", "toxicity_safety", "description", "fact"
         ]
     },
@@ -1342,14 +1342,14 @@ class LibraryWindow(tk.Toplevel):
             seen = set()
             for i, val in enumerate(row):
                 col = cols[i]
-                if col in ("id", "added_on", "photo_path"):
+                if col in ("id", "added_on", "photo_path", "category"):
                     continue
                 if val:
                     label = col.replace('_', ' ').capitalize()
                     self.info_text.insert(tk.END, f"• {label}: {val}\n\n")
                     seen.add(col)
             for key in order:
-                if key in seen or key in HIDDEN_META_KEYS:
+                if key in seen or key in HIDDEN_META_KEYS or key == "category":
                     continue
                 val = detail_map.get(key)
                 if val:
