@@ -80,6 +80,32 @@ def _decontainerize_guesses(guesses):
         out.append(g)
     return out
 
+# --- Species utilities & zoological hints ---
+SPECIES_RE = re.compile(r"^[A-Z][a-z]+(?:\s[a-z\-]+){1,2}$")  # Genus species (optional subspecies)
+
+
+def _is_species_name(s: str) -> bool:
+    return bool(SPECIES_RE.match((s or "").strip()))
+
+
+ZOO_GROUP_HINTS = {
+    "butterfly": "insect", "moth": "insect", "beetle": "insect", "insect": "insect",
+    "dragonfly": "insect", "mantis": "insect", "wasp": "insect", "bee": "insect",
+    "spider": "arachnid", "scorpion": "arachnid",
+    "tooth": "tooth", "fang": "tooth", "tusk": "tooth",
+    "antler": "antler", "horn": "antler",
+    "bone": "bone", "skull": "bone", "vertebra": "bone", "rib": "bone", "femur": "bone", "metacarpal": "bone", "phalanx": "bone",
+    "feather": "feather", "skin": "skin", "hide": "skin", "taxidermy": "skin"
+}
+
+
+def _infer_zoo_group(label: str) -> str:
+    s = (label or "").lower()
+    for k, v in ZOO_GROUP_HINTS.items():
+        if k in s:
+            return v
+    return "insect"  # safe default
+
 
 def _autocrop_inside_case(src_path: str) -> str:
     """
@@ -459,24 +485,37 @@ def _json_chat(prompt: str) -> dict:
 
 def guess_species_from_image(photo_path: str, group_hint: str = "insect", max_results: int = 5):
     """
-    Return top species candidates for zoological specimen photos.
-    Output: list of dicts with keys:
-      scientific_name, common_name, rank, family, genus, confidence (0..1), rationale
+    Return up to N SPECIES-level candidates from the photo.
+    For osteo items: include bone/tooth element in rationale; still return species.
+    Output list items have: scientific_name, common_name, rank ('species' or 'subspecies'),
+    family, genus, confidence (0..1), rationale, and optional element (for bone/tooth).
     """
     da = _img_to_data_url(photo_path) if photo_path and os.path.exists(photo_path) else ""
     if not da:
         return []
-    system = (
-        "You are a museum taxonomist. Identify the organism in the photo to the most specific SAFE rank. "
-        "Prefer Genus species if visible; otherwise genus/family. "
-        "Avoid vague outputs like 'insect specimen'."
-    )
+
+    if group_hint in ("bone", "tooth", "antler"):
+        system = (
+            "You are a museum osteology curator. Identify the species from the photo, "
+            "and note the skeletal element (e.g., canine tooth, rib, femur, metacarpal) if visible. "
+            "Return ONLY species-level names (or subspecies). No genus-only or family-only results."
+        )
+        extra_rule = "Each item MUST be species or subspecies. Include an 'element' string for bone/tooth if deducible."
+    else:
+        system = (
+            "You are a museum entomology/ornithology curator. Identify the organism to SPECIES (or subspecies) "
+            "using visible traits. Return ONLY species-level names. No generic outputs."
+        )
+        extra_rule = "Each item MUST be species or subspecies."
+
     user = (
-        f"Task: Identify likely species for this zoological specimen.\n"
         f"Group hint: {group_hint}\n"
-        f"Return ONLY a JSON array with up to {max_results} objects. Each object must have:\n"
-        '{"scientific_name":"","common_name":"","rank":"","family":"","genus":"","confidence":0.0,"rationale":""}'
+        "Return a compact JSON array (no prose). Schema for each item:\n"
+        '{"scientific_name":"","common_name":"","rank":"","family":"","genus":"","confidence":0.0,"rationale":"","element":""}\n'
+        f"{extra_rule}\n"
+        f"Limit to {max_results}. Confidence is 0..1. If uncertain, still provide the single best species guess with lower confidence."
     )
+
     resp = _openai_client().responses.create(
         model="gpt-4o-mini",
         input=[
@@ -489,25 +528,73 @@ def guess_species_from_image(photo_path: str, group_hint: str = "insect", max_re
         temperature=0.1, max_output_tokens=700
     )
     txt = getattr(resp, "output_text", "").strip()
+    # parse robustly
     try:
         arr = json.loads(txt)
     except Exception:
         s, e = txt.find("["), txt.rfind("]")
         arr = json.loads(txt[s:e+1]) if (s!=-1 and e!=-1 and e>s) else []
+
+    # keep ONLY species/subspecies; sanitize and sort
     out = []
     for it in (arr if isinstance(arr, list) else []):
         sci = (it.get("scientific_name") or "").strip()
-        com = (it.get("common_name") or "").strip()
-        fam = (it.get("family") or "").strip()
-        gen = (it.get("genus") or "").strip()
-        rank = (it.get("rank") or "").strip() or ("species" if " " in sci else "genus")
+        if not _is_species_name(sci):
+            continue  # species-only policy
+        rank = (it.get("rank") or "").strip().lower()
+        if rank not in ("species", "subspecies", ""):
+            continue
         conf = float(it.get("confidence") or 0)
         out.append({
-            "scientific_name": sci, "common_name": com, "family": fam, "genus": gen,
-            "rank": rank, "confidence": max(0.0,min(1.0,conf)), "rationale": (it.get("rationale") or "").strip()
+            "scientific_name": sci,
+            "common_name": (it.get("common_name") or "").strip(),
+            "family": (it.get("family") or "").strip(),
+            "genus": (it.get("genus") or "").strip(),
+            "rank": "subspecies" if " " in sci and rank=="subspecies" else "species",
+            "confidence": max(0.0, min(1.0, conf)),
+            "rationale": (it.get("rationale") or "").strip(),
+            "element": (it.get("element") or "").strip()
         })
-    out = [o for o in out if o["scientific_name"] or o["genus"] or o["family"]]
     out.sort(key=lambda d: d["confidence"], reverse=True)
+    # if model failed to give species, try a tiny fallback: ask once more with stricter instruction
+    if not out:
+        # one strict retry
+        strict = (
+            "Return ONLY a JSON array of species (or subspecies). Use the strict schema above. "
+            "Do not output genus-only or generic terms."
+        )
+        resp2 = _openai_client().responses.create(
+            model="gpt-4o-mini",
+            input=[
+                {"role":"system","content":[{"type":"input_text","text":system}]},
+                {"role":"user","content":[
+                    {"type":"input_text","text":user + "\n" + strict},
+                    {"type":"input_image","image_url":da}
+                ]}
+            ],
+            temperature=0.0, max_output_tokens=500
+        )
+        txt2 = getattr(resp2, "output_text", "").strip()
+        try:
+            arr2 = json.loads(txt2)
+        except Exception:
+            s, e = txt2.find("["), txt2.rfind("]")
+            arr2 = json.loads(txt2[s:e+1]) if (s!=-1 and e!=-1 and e>s) else []
+        for it in (arr2 if isinstance(arr2, list) else []):
+            sci = (it.get("scientific_name") or "").strip()
+            if _is_species_name(sci):
+                conf = float(it.get("confidence") or 0)
+                out.append({
+                    "scientific_name": sci,
+                    "common_name": (it.get("common_name") or "").strip(),
+                    "family": (it.get("family") or "").strip(),
+                    "genus": (it.get("genus") or "").strip(),
+                    "rank": "species",
+                    "confidence": max(0.0, min(1.0, conf)),
+                    "rationale": (it.get("rationale") or "").strip(),
+                    "element": (it.get("element") or "").strip()
+                })
+        out.sort(key=lambda d: d["confidence"], reverse=True)
     return out[:max_results]
 
 
@@ -2651,11 +2738,17 @@ class ClassifierApp:
                 self.master.after_cancel(self._ref_job)
             except Exception:
                 pass
-        clean = normalize_zoo_label(term) if (self.category_var.get() or "").lower().strip() == "zoological" else _decontainerize_label(term)
-        if (self.category_var.get() or "").lower().strip() == "zoological":
-            # Bias search toward organism views
-            if not any(w in clean for w in ["specimen","butterfly","moth","beetle","insect","bone","tooth","antler","horn","feather","skin","taxidermy"]):
-                clean = f"{clean} specimen"
+        cat = (self.category_var.get() or "").lower().strip()
+        sel = (term or "").strip()
+        if cat == "zoological":
+            if _is_species_name(sel):
+                clean = sel
+            else:
+                clean = normalize_zoo_label(term)
+                if not any(w in clean for w in ["specimen","butterfly","moth","beetle","insect","bone","tooth","antler","horn","feather","skin","taxidermy"]):
+                    clean = f"{clean} specimen"
+        else:
+            clean = _decontainerize_label(term)
         self._ref_job = self.master.after(150, lambda t=clean: self.load_reference_images(t))
 
     def load_reference_images(self, term: str):
@@ -2738,21 +2831,24 @@ class ClassifierApp:
             self.image_label.image = tk_img
             cropped = _autocrop_inside_case(path)
             self._last_image_path = cropped or path
-            if (self.category_var.get() or "").lower().strip()=="zoological":
-                self.result_text.delete(1.0,tk.END)
-                self.result_text.insert(tk.END,"Finding species candidates…\n")
-                self.master.update_idletasks()
+            if (self.category_var.get() or "").lower().strip() == "zoological":
+                self.result_text.delete(1.0, tk.END)
+                self.result_text.insert(tk.END, "Finding species candidates…\n"); self.master.update_idletasks()
+                label_hint = (self.choice_var.get() or (self.last_classification.get("label", "") if getattr(self, "last_classification", None) else "") or "")
+                group_hint = _infer_zoo_group(normalize_zoo_label(label_hint))
                 def _bg_species():
-                    try: cands=guess_species_from_image(self._last_image_path,group_hint="insect",max_results=5)
-                    except Exception: cands=[]
-                    self.master.after(0,lambda:(
-                        self.result_text.delete(1.0,tk.END),
-                        self.result_text.insert(tk.END,"Top candidates:\n"+
-                            "\n".join(f"• {self._format_taxon_label(c)} — {c.get('rationale','')[:120]}" for c in cands) if cands else "No candidates.\n"),
-                        self._show_species_candidates(cands if cands else [{"scientific_name":"Insect (Lepidoptera)","common_name":"","rank":"order","family":"","genus":"","confidence":0.0}])
+                    try:
+                        cands = guess_species_from_image(self._last_image_path, group_hint=group_hint, max_results=5)
+                    except Exception:
+                        cands = []
+                    self.master.after(0, lambda: (
+                        self.result_text.delete(1.0, tk.END),
+                        self.result_text.insert(tk.END, "Top species:\n" +
+                            "\n".join(f"• {self._format_taxon_label(c)} — {c.get('rationale','')[:120]}" for c in cands) + "\n" if cands else "No species-level match.\n"),
+                        self._show_species_candidates(cands)
                     ))
-                threading.Thread(target=_bg_species,daemon=True).start()
-                return  # skip generic classification
+                threading.Thread(target=_bg_species, daemon=True).start()
+                return
             self.classify_and_display(self._last_image_path)
         except Exception as e:
             messagebox.showerror('Error', str(e))
@@ -2844,46 +2940,52 @@ class ClassifierApp:
             self._rb_widgets[0].invoke()
 
     def _format_taxon_label(self, cand: dict) -> str:
-        sci, com, fam, gen = (
-            cand.get("scientific_name", ""),
-            cand.get("common_name", ""),
-            cand.get("family", ""),
-            cand.get("genus", ""),
-        )
+        sci = cand.get("scientific_name", "").strip()
+        com = cand.get("common_name", "").strip()
+        elem = cand.get("element", "").strip()
         conf = cand.get("confidence", 0.0)
-        bits = []
-        if sci: bits.append(sci)
-        elif gen: bits.append(gen)
-        elif fam: bits.append(fam)
-        if com: bits.append(f"“{com}”")
+        bits = [sci or ""]
+        if com:
+            bits.append(f"“{com}”")
+        if elem:
+            bits.append(f"({elem})")
         bits.append(f"[{int(round(conf*100))}%]")
-        return " ".join(bits)
+        return " ".join([b for b in bits if b]).strip()
 
     def _show_species_candidates(self, cands: list):
-        for w in getattr(self,"_rb_widgets",[]):
-            try: w.destroy()
-            except Exception: pass
-        self._rb_widgets=[]
-        self._chosen_label=""
+        cands = [c for c in (cands or []) if _is_species_name(c.get("scientific_name", ""))]
+        for w in getattr(self, "_rb_widgets", []):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._rb_widgets = []
+        self._chosen_label = ""
         var = tk.StringVar(value="")
         self.choice_var = var
-        def _select(val,cand):
-            self._chosen_label=val
+
+        def _select(val, cand):
+            self._chosen_label = val
             self.on_guess_selected(val)
-            self.last_classification={"label":val,"confidence":cand.get("confidence",0)}
-        for i,cand in enumerate(cands[:5]):
-            label=self._format_taxon_label(cand)
-            rb=tk.Radiobutton(self.rb_frame,text=label,value=label,variable=var,
-                              command=lambda v=label,c=cand:_select(v,c),
-                              bg=COLORS['bg_panel'],fg=COLORS['fg_primary'],
-                              selectcolor=COLORS['accent_a'],
-                              activebackground=COLORS['bg_panel'],
-                              activeforeground=COLORS['fg_primary'])
-            rb.grid(row=i,column=0,sticky="w",padx=4,pady=2)
+            self.last_classification = {"label": val, "confidence": cand.get("confidence", 0)}
+
+        for i, cand in enumerate(cands[:5]):
+            label = self._format_taxon_label(cand)
+            rb = tk.Radiobutton(
+                self.rb_frame, text=label, value=label, variable=var,
+                command=lambda v=label, c=cand: _select(v, c),
+                bg=COLORS['bg_panel'], fg=COLORS['fg_primary'],
+                selectcolor=COLORS['accent_a'],
+                activebackground=COLORS['bg_panel'], activeforeground=COLORS['fg_primary'])
+            rb.grid(row=i, column=0, sticky="w", padx=4, pady=2)
             self._rb_widgets.append(rb)
         if cands:
-            first=self._format_taxon_label(cands[0])
-            var.set(first); _select(first,cands[0])
+            first = self._format_taxon_label(cands[0])
+            var.set(first)
+            _select(first, cands[0])
+        else:
+            self.result_text.delete(1.0, tk.END)
+            self.result_text.insert(tk.END, "No species-level match. Try a closer, glare-free photo.\n")
 
     def open_detail_window(self):
         chosen = (self.choice_var.get() or "").strip()
