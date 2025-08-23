@@ -402,12 +402,48 @@ ZOO_ENRICH_KEYS = [
     "toxicity_safety", "description", "fact"
 ]
 
+# Default JSON-capable OpenAI model
+_OPENAI_MODEL_JSON = "gpt-4o-mini"
+
+
+def _safe_first_text(resp) -> str:
+    """Safely extract the first text response from an OpenAI response object."""
+    try:
+        txt = getattr(resp, "output_text", "")
+        if txt:
+            return txt.strip()
+    except Exception:
+        pass
+    try:
+        out = getattr(resp, "output", [])
+        if out and getattr(out[0], "content", None):
+            seg = out[0].content
+            if seg and getattr(seg[0], "text", ""):
+                return seg[0].text.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _parse_json_object(text: str) -> dict:
+    """Robustly parse a JSON object from a string, returning an empty dict on failure."""
+    try:
+        return json.loads(text)
+    except Exception:
+        try:
+            s, e = text.find("{"), text.rfind("}")
+            if s != -1 and e != -1 and e > s:
+                return json.loads(text[s:e+1])
+        except Exception:
+            pass
+    return {}
+
 
 def _json_chat(prompt: str) -> dict:
     """Send a simple text prompt and parse JSON response."""
     client = _openai_client()
     resp = client.responses.create(
-        model="gpt-4o-mini",
+        model=_OPENAI_MODEL_JSON,
         input=[{"role": "user", "content": [
             {"type": "input_text", "text": prompt}]}],
         temperature=0.2,
@@ -419,6 +455,34 @@ def _json_chat(prompt: str) -> dict:
     except Exception:
         s, e = text.find("{"), text.rfind("}")
         return json.loads(text[s:e+1]) if (s != -1 and e != -1 and e > s) else {}
+
+
+def _json_chat_vision(prompt: str, photo_path: str) -> dict:
+    """
+    Send a JSON-only instruction + the actual image to the model.
+    Returns a dict; on any error, returns {}.
+    """
+    try:
+        da = _img_to_data_url(photo_path) if photo_path and os.path.exists(photo_path) else None
+        if not da:
+            # fall back to text-only if image is missing
+            return _json_chat(prompt) or {}
+        msgs = [
+            {"role": "system", "content": "You are a careful cataloger. Reply ONLY with a single valid JSON object, no prose."},
+            {"role": "user", "content": [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_image", "image_url": da}
+            ]}
+        ]
+        resp = _openai_client().responses.create(
+            model=_OPENAI_MODEL_JSON,
+            input=msgs,
+            max_output_tokens=600
+        )
+        text = _safe_first_text(resp)
+        return _parse_json_object(text)
+    except Exception:
+        return {}
 
 
 def guess_parent_concept(raw_label: str) -> str:
@@ -563,12 +627,12 @@ def _zoo_make_prompt(name, label, concept=None, fill_only=None):
     )
 
 
-def enrich_zoological_two_pass(name: str, raw_label: str, label_conf: float = 1.0, min_fields: int = 7) -> dict:
+def enrich_zoological_two_pass(name: str, raw_label: str, photo_path: str, label_conf: float = 1.0, min_fields: int = 7) -> dict:
     label_norm = normalize_zoo_label(raw_label)
 
     # Pass 1: try with the normalized label
     p1 = _zoo_make_prompt(name, label_norm)
-    r1 = _json_chat(p1) or {}
+    r1 = _json_chat_vision(p1, photo_path) or {}
     out = {k: r1.get(k, "") for k in ZOO_ENRICH_KEYS}
 
     def _filled(d): return sum(1 for k in ZOO_ENRICH_KEYS if (d.get(k) or "").strip())
@@ -580,7 +644,7 @@ def enrich_zoological_two_pass(name: str, raw_label: str, label_conf: float = 1.
     missing = [k for k in ZOO_ENRICH_KEYS if not (out.get(k) or "").strip()]
     if missing:
         p2 = _zoo_make_prompt(name, label_norm, concept=parent, fill_only=missing)
-        r2 = _json_chat(p2) or {}
+        r2 = _json_chat_vision(p2, photo_path) or {}
         for k in missing:
             v = (r2.get(k) or "").strip()
             if v:
@@ -2298,7 +2362,8 @@ class ItemDetailWindow(tk.Toplevel):
         cat = alias_map.get((self.category or '').strip(
         ).lower(), (self.category or '').strip().lower())
         helpers = self._gather_user_helpers()
-        name_for_prompt = helpers.get("name", "").strip() or "(unnamed item)"
+        raw_name = helpers.get("name", "").strip()
+        name_for_prompt = raw_name or "(unnamed item)"
         schema = SCHEMAS.get(cat, SCHEMAS["other"])
         key_list = list(dict.fromkeys(schema['api']))
 
@@ -2325,11 +2390,18 @@ class ItemDetailWindow(tk.Toplevel):
                 elif cat == "coin":
                     meta = enrich_coin(name_for_prompt, helpers)
                 elif cat == "zoological":
-                    lbl, conf = "", 1.0
-                    if getattr(self, "last_classification", None):
-                        lbl = self.last_classification.get("label", "")
-                        conf = float(self.last_classification.get("confidence", 0) or 0)
-                    meta = enrich_zoological_two_pass(name_for_prompt, lbl, conf)
+                    # Use two-pass zoological enrichment with the image so the model
+                    # can identify the organism (e.g., "death's-head hawkmoth") rather than the container.
+                    lbl = raw_name or (
+                        self.last_classification.get("label", "") if self.last_classification else ""
+                    )
+                    conf = (
+                        float(self.last_classification.get("confidence", 0) or 0)
+                        if self.last_classification else 0.0
+                    )
+                    meta = enrich_zoological_two_pass(
+                        lbl or "zoological specimen", lbl, self.photo_path, conf
+                    )
                 else:
                     meta = {}
             except Exception as e:
