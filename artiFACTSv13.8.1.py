@@ -21,7 +21,15 @@ import requests
 
 import numpy as np  # if not already imported
 
-CASE_TERMS_RE = re.compile(r"\b(display\s*case|shadow\s*box|case|box|frame)\b", re.I)
+CASE_TERMS_RE = re.compile(
+    r"\b("
+    r"display\s*case|shadow\s*box|shadowbox|"
+    r"case|box|frame|framed|"
+    r"mount(?:ed)?|mounted|"
+    r"display|presentation|plaque|cabinet"
+    r")\b",
+    re.I
+)
 
 
 def _decontainerize_label(label: str) -> str:
@@ -2612,9 +2620,13 @@ class ClassifierApp:
             'openai', {}) if isinstance(result, dict) else {}
         oa_guesses = (openai_block.get('guesses') or [])[:3]
         oa_guesses = _decontainerize_guesses(oa_guesses)
+        if cat == "zoological":
+            for g in oa_guesses:
+                g["label"] = normalize_zoo_label(g.get("label", ""))
         prio_words = [
-            "specimen", "butterfly", "moth", "beetle", "insect", "bone",
-            "tooth", "antler", "horn", "feather", "skin", "taxidermy",
+            "specimen", "butterfly", "moth", "beetle", "insect",
+            "lepidoptera", "coleoptera", "arthropod",
+            "bone", "tooth", "antler", "horn", "feather", "skin", "taxidermy"
         ]
         good, rest = [], []
         for g in oa_guesses:
