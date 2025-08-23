@@ -457,6 +457,60 @@ def _json_chat(prompt: str) -> dict:
         return json.loads(text[s:e+1]) if (s != -1 and e != -1 and e > s) else {}
 
 
+def guess_species_from_image(photo_path: str, group_hint: str = "insect", max_results: int = 5):
+    """
+    Return top species candidates for zoological specimen photos.
+    Output: list of dicts with keys:
+      scientific_name, common_name, rank, family, genus, confidence (0..1), rationale
+    """
+    da = _img_to_data_url(photo_path) if photo_path and os.path.exists(photo_path) else ""
+    if not da:
+        return []
+    system = (
+        "You are a museum taxonomist. Identify the organism in the photo to the most specific SAFE rank. "
+        "Prefer Genus species if visible; otherwise genus/family. "
+        "Avoid vague outputs like 'insect specimen'."
+    )
+    user = (
+        f"Task: Identify likely species for this zoological specimen.\n"
+        f"Group hint: {group_hint}\n"
+        f"Return ONLY a JSON array with up to {max_results} objects. Each object must have:\n"
+        '{"scientific_name":"","common_name":"","rank":"","family":"","genus":"","confidence":0.0,"rationale":""}'
+    )
+    resp = _openai_client().responses.create(
+        model="gpt-4o-mini",
+        input=[
+            {"role": "system", "content":[{"type":"input_text","text":system}]},
+            {"role": "user", "content":[
+                {"type":"input_text","text":user},
+                {"type":"input_image","image_url":da}
+            ]}
+        ],
+        temperature=0.1, max_output_tokens=700
+    )
+    txt = getattr(resp, "output_text", "").strip()
+    try:
+        arr = json.loads(txt)
+    except Exception:
+        s, e = txt.find("["), txt.rfind("]")
+        arr = json.loads(txt[s:e+1]) if (s!=-1 and e!=-1 and e>s) else []
+    out = []
+    for it in (arr if isinstance(arr, list) else []):
+        sci = (it.get("scientific_name") or "").strip()
+        com = (it.get("common_name") or "").strip()
+        fam = (it.get("family") or "").strip()
+        gen = (it.get("genus") or "").strip()
+        rank = (it.get("rank") or "").strip() or ("species" if " " in sci else "genus")
+        conf = float(it.get("confidence") or 0)
+        out.append({
+            "scientific_name": sci, "common_name": com, "family": fam, "genus": gen,
+            "rank": rank, "confidence": max(0.0,min(1.0,conf)), "rationale": (it.get("rationale") or "").strip()
+        })
+    out = [o for o in out if o["scientific_name"] or o["genus"] or o["family"]]
+    out.sort(key=lambda d: d["confidence"], reverse=True)
+    return out[:max_results]
+
+
 def _json_chat_vision(prompt: str, photo_path: str) -> dict:
     """
     Send a JSON-only instruction + the actual image to the model.
@@ -2683,7 +2737,23 @@ class ClassifierApp:
             self.image_label.config(image=tk_img, text='')
             self.image_label.image = tk_img
             cropped = _autocrop_inside_case(path)
-            self.classify_and_display(cropped or path)
+            self._last_image_path = cropped or path
+            if (self.category_var.get() or "").lower().strip()=="zoological":
+                self.result_text.delete(1.0,tk.END)
+                self.result_text.insert(tk.END,"Finding species candidates…\n")
+                self.master.update_idletasks()
+                def _bg_species():
+                    try: cands=guess_species_from_image(self._last_image_path,group_hint="insect",max_results=5)
+                    except Exception: cands=[]
+                    self.master.after(0,lambda:(
+                        self.result_text.delete(1.0,tk.END),
+                        self.result_text.insert(tk.END,"Top candidates:\n"+
+                            "\n".join(f"• {self._format_taxon_label(c)} — {c.get('rationale','')[:120]}" for c in cands) if cands else "No candidates.\n"),
+                        self._show_species_candidates(cands if cands else [{"scientific_name":"Insect (Lepidoptera)","common_name":"","rank":"order","family":"","genus":"","confidence":0.0}])
+                    ))
+                threading.Thread(target=_bg_species,daemon=True).start()
+                return  # skip generic classification
+            self.classify_and_display(self._last_image_path)
         except Exception as e:
             messagebox.showerror('Error', str(e))
 
@@ -2772,6 +2842,48 @@ class ClassifierApp:
             self._rb_widgets.append(rb)
         if self._rb_widgets:
             self._rb_widgets[0].invoke()
+
+    def _format_taxon_label(self, cand: dict) -> str:
+        sci, com, fam, gen = (
+            cand.get("scientific_name", ""),
+            cand.get("common_name", ""),
+            cand.get("family", ""),
+            cand.get("genus", ""),
+        )
+        conf = cand.get("confidence", 0.0)
+        bits = []
+        if sci: bits.append(sci)
+        elif gen: bits.append(gen)
+        elif fam: bits.append(fam)
+        if com: bits.append(f"“{com}”")
+        bits.append(f"[{int(round(conf*100))}%]")
+        return " ".join(bits)
+
+    def _show_species_candidates(self, cands: list):
+        for w in getattr(self,"_rb_widgets",[]):
+            try: w.destroy()
+            except Exception: pass
+        self._rb_widgets=[]
+        self._chosen_label=""
+        var = tk.StringVar(value="")
+        self.choice_var = var
+        def _select(val,cand):
+            self._chosen_label=val
+            self.on_guess_selected(val)
+            self.last_classification={"label":val,"confidence":cand.get("confidence",0)}
+        for i,cand in enumerate(cands[:5]):
+            label=self._format_taxon_label(cand)
+            rb=tk.Radiobutton(self.rb_frame,text=label,value=label,variable=var,
+                              command=lambda v=label,c=cand:_select(v,c),
+                              bg=COLORS['bg_panel'],fg=COLORS['fg_primary'],
+                              selectcolor=COLORS['accent_a'],
+                              activebackground=COLORS['bg_panel'],
+                              activeforeground=COLORS['fg_primary'])
+            rb.grid(row=i,column=0,sticky="w",padx=4,pady=2)
+            self._rb_widgets.append(rb)
+        if cands:
+            first=self._format_taxon_label(cands[0])
+            var.set(first); _select(first,cands[0])
 
     def open_detail_window(self):
         chosen = (self.choice_var.get() or "").strip()
