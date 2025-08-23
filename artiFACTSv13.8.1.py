@@ -331,6 +331,40 @@ FOSSIL_ENRICH_KEYS = [
 ]
 
 
+# Tiny zoological ontology and enrichment keys
+ZOO_GENERIC_CONCEPTS = {
+    # insects
+    "butterfly": "insect_specimen",
+    "moth": "insect_specimen",
+    "beetle": "insect_specimen",
+    "dragonfly": "insect_specimen",
+    "mantis": "insect_specimen",
+    "bee": "insect_specimen",
+    "wasp": "insect_specimen",
+    "insect": "insect_specimen",
+    # vertebrate parts
+    "tooth": "tooth_specimen",
+    "fang": "tooth_specimen",
+    "tusk": "tooth_specimen",
+    "antler": "antler_horn_specimen",
+    "horn": "antler_horn_specimen",
+    "bone": "bone_specimen",
+    "skull": "bone_specimen",
+    "vertebra": "bone_specimen",
+    # other
+    "feather": "feather_specimen",
+    "skin": "skin_taxidermy_specimen",
+    "hide": "skin_taxidermy_specimen",
+    "taxidermy": "skin_taxidermy_specimen",
+}
+
+ZOO_ENRICH_KEYS = [
+    "scientific_name", "specimen_type", "common_name", "taxonomic_rank",
+    "size_range", "identification_tips", "material", "care_preservation",
+    "toxicity_safety", "description", "fact"
+]
+
+
 def _json_chat(prompt: str) -> dict:
     """Send a simple text prompt and parse JSON response."""
     client = _openai_client()
@@ -457,6 +491,69 @@ def enrich_fossil_two_pass(name: str, raw_label: str, label_conf: float = 1.0, m
         out = merge_missing(out, r2)
 
     return postprocess_all(validate_text(out, label_conf))
+
+
+# Zoological two-pass enrichment helpers
+
+def _zoo_guess_parent(raw_label: str) -> str:
+    s = (raw_label or "").lower()
+    for k, v in ZOO_GENERIC_CONCEPTS.items():
+        if k in s:
+            return v
+    return "zoological_specimen"
+
+
+def _zoo_make_prompt(name, label, concept=None, fill_only=None):
+    scope = concept or "zoological_specimen"
+    fields = ", ".join(fill_only or ZOO_ENRICH_KEYS)
+    rules = [
+        f'Item name: "{name}"',
+        f'Classifier label: "{label}"',
+        f'Concept: "{scope}"',
+        "Return concise, widely applicable statements (1–2 sentences per field).",
+        "Describe the preserved organism; ignore the container/frame.",
+        "Prefer safe taxonomy: give Genus species only if confident; otherwise provide order/family.",
+        "Use plain strings; if uncertain, leave the field blank.",
+    ]
+    return (
+        "Enrich this zoological catalog card.\n\nRules:\n- " +
+        "\n- ".join(rules) +
+        "\n\nReturn strict JSON with exactly these keys: " +
+        (fields if fill_only else ", ".join(ZOO_ENRICH_KEYS))
+    )
+
+
+def enrich_zoological_two_pass(name: str, raw_label: str, label_conf: float = 1.0, min_fields: int = 7) -> dict:
+    # Pass 1: try with the raw label
+    p1 = _zoo_make_prompt(name, raw_label)
+    r1 = _json_chat(p1) or {}
+    out = {k: r1.get(k, "") for k in ZOO_ENRICH_KEYS}
+
+    # Enough? return
+    def _filled(d): return sum(1 for k in ZOO_ENRICH_KEYS if (d.get(k) or "").strip())
+    if _filled(out) >= min_fields:
+        return out
+
+    # Pass 2: back off to parent concept derived from tiny ontology
+    parent = _zoo_guess_parent(raw_label)
+    missing = [k for k in ZOO_ENRICH_KEYS if not (out.get(k) or "").strip()]
+    if missing:
+        p2 = _zoo_make_prompt(name, raw_label, concept=parent, fill_only=missing)
+        r2 = _json_chat(p2) or {}
+        for k in missing:
+            v = (r2.get(k) or "").strip()
+            if v:
+                out[k] = v
+
+    # Light postprocess: normalize absolutes
+    for k, v in list(out.items()):
+        if isinstance(v, str) and v:
+            out[k] = (
+                v.replace(" always ", " often ")
+                 .replace(" Always ", " Often ")
+                 .strip()
+            )[:600]
+    return out
 
 
 def merge_gpt_and_discogs(gpt: dict, discogs: dict) -> dict:
@@ -1551,7 +1648,8 @@ def _build_reference_query(category: str, term: str) -> str:
     if c == "mineral":
         return f"{t} mineral specimen macro"
     if c == "zoological":
-        return f"{t} specimen"
+        # Encourage taxonomy-forward image results
+        return f"{t} specimen dorsal"
     return t
 
 
@@ -2191,8 +2289,11 @@ class ItemDetailWindow(tk.Toplevel):
                 elif cat == "coin":
                     meta = enrich_coin(name_for_prompt, helpers)
                 elif cat == "zoological":
-                    meta = enrich_generic_openai(
-                        name_for_prompt, cat, self.photo_path, helpers, key_list)
+                    lbl, conf = "", 1.0
+                    if getattr(self, "last_classification", None):
+                        lbl = self.last_classification.get("label", "")
+                        conf = float(self.last_classification.get("confidence", 0) or 0)
+                    meta = enrich_zoological_two_pass(name_for_prompt, lbl, conf)
                 else:
                     meta = {}
             except Exception as e:
@@ -2485,16 +2586,15 @@ class ClassifierApp:
             'openai', {}) if isinstance(result, dict) else {}
         oa_guesses = (openai_block.get('guesses') or [])[:3]
         oa_guesses = _decontainerize_guesses(oa_guesses)
-        preferred = []
+        prio_words = [
+            "specimen", "butterfly", "moth", "beetle", "insect", "bone",
+            "tooth", "antler", "horn", "feather", "skin", "taxidermy",
+        ]
+        good, rest = [], []
         for g in oa_guesses:
-            lbl = g.get("label", "").lower()
-            if any(k in lbl for k in [
-                "specimen", "butterfly", "moth", "insect", "beetle",
-                "antler", "bone", "tooth", "feather", "fossil"]):
-                preferred.insert(0, g)
-            else:
-                preferred.append(g)
-        oa_guesses = preferred
+            lbl = (g.get("label") or "").lower()
+            (good if any(w in lbl for w in prio_words) else rest).append(g)
+        oa_guesses = good + rest
         if oa_guesses:
             top = oa_guesses[0]
             self.last_classification = {
