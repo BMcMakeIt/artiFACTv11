@@ -515,17 +515,6 @@ ALIASES = {
     "discogs_median_price_usd": ("median price usd", "discogs median price"),
     "discogs_low_high_usd":    ("low high usd", "price range usd"),
 
-    # toy
-    "toy_line_series": ("line", "series", "toy line", "line_or_series"),
-    "character_model": ("character", "model", "character/model"),
-    "product_code_sku": ("sku", "upc", "product code", "product_code"),
-    "articulation_points": ("articulation", "points of articulation"),
-    "accessories_included": ("accessories", "included accessories"),
-    "packaging_type": ("packaging", "package", "box type"),
-    "packaging_variants": ("packaging variants", "variant packaging"),
-    "original_msrp": ("msrp", "original price"),
-    "priceguide_median_usd": ("median price usd", "price guide median"),
-    "priceguide_low_high_usd": ("low high usd", "price guide range"),
 }
 
 
@@ -577,7 +566,7 @@ def enrich_generic_openai(name: str, category: str, photo_path: str, helpers: di
         "Assume the role of a renowned domain expert for the given category: "
         "minerals/shells/fossils → experienced field geologist and museum registrar; "
         "vinyl → Discogs-grade metadata editor and record store buyer; "
-        "cards/coins → PSA/NGC-style grader with auction catalog experience. "
+        "coins → PSA/NGC-style grader with auction catalog experience. "
         "Your job: produce strictly structured, accurate catalog metadata. "
         "Never invent facts—leave the field blank if uncertain. "
         "Return ONLY minified JSON with exactly the provided keys."
@@ -769,70 +758,12 @@ def enrich_vinyl(name: str, photo_path: str, helpers: dict) -> dict:
     return map_llm_json_to_keys(merged, key_list)
 
 
-def enrich_toy(name: str, helpers: dict, photo_path: str = "") -> dict:
-    client = _openai_client()
-    key_list = SCHEMAS["toy"]["api"]
-
-    sku = helpers.get("sku_upc", "").strip()
-    user_brand = helpers.get("brand", "").strip()
-    user_line = helpers.get("toy_line_series", "").strip()
-    user_char = helpers.get("character_model", "").strip()
-    keys_json = "{" + ",".join([f'"{k}":""' for k in key_list]) + "}"
-
-    system = (
-        "You are a master cataloger and professional archivist specializing in collectible toys and action figures, "
-        "with the rigor of a museum registrar and the product literacy of a Hasbro/Kenner line manager. "
-        "Assess images and text to infer structured fields. "
-        "Be precise, avoid hallucinations, and leave unknown fields blank. "
-        "Return ONLY minified JSON using the exact keys provided."
-    )
-    guidance = (
-        "- articulation_points = integer if known.\n"
-        "- dimensions_mm / weight_grams: approximate if clearly known; else blank.\n"
-        "- packaging_type e.g. 'carded blister', 'window box', 'closed box'.\n"
-        "- price fields are USD; leave blank if unknown."
-    )
-
-    user_text = (
-        f"Item category: toy\n"
-        f"Label/name: {name}\n"
-        f"Hints — brand: {user_brand}; line/series: {user_line}; character/model: {user_char}; SKU/UPC: {sku}\n\n"
-        f"Return JSON with these keys exactly:\n{keys_json}\n"
-        f"{guidance}"
-    )
-
-    resp = client.responses.create(
-        model="gpt-4o-mini",
-        input=[
-            {"role": "system", "content": [
-                {"type": "input_text", "text": system}]},
-            {"role": "user", "content": [
-                {"type": "input_text", "text": user_text}]}
-        ],
-        temperature=0.2, max_output_tokens=800
-    )
-
-    text = getattr(resp, "output_text", "").strip()
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        s, e = text.find("{"), text.rfind("}")
-        parsed = json.loads(text[s:e+1]) if (s != -
-                                             1 and e != -1 and e > s) else {}
-
-    return map_llm_json_to_keys(parsed, key_list)
-
 
 def enrich_coin(name: str, helpers: dict) -> dict:
     key_list = SCHEMAS["coin"]["api"]
     # We don’t have the photo path here; pass empty string (fine for coins).
     return enrich_generic_openai(name, "coin", "", helpers, key_list)
 
-
-def enrich_card(name: str, helpers: dict, photo_path: str = "") -> dict:
-    key_list = SCHEMAS["card"]["api"]
-    # If you want to send the image later, we can refactor collect_details to pass it.
-    return enrich_generic_openai(name, "card", photo_path, helpers, key_list)
 
 
 # Your image classifier module (unchanged)
@@ -857,7 +788,6 @@ def _openai_client():
 COLORS = {
     'bg_app':      '#0f172a',
     'bg_panel':    '#111827',
-    'bg_card':     '#111827',
     'fg_primary':  '#e5e7eb',
     'fg_muted':    '#9ca3af',
     'accent_a':    '#22d3ee',
@@ -870,17 +800,15 @@ DB_PATH = "collection_catalog.db"
 PHOTO_DIR = "photos"
 PHOTO_SLOTS = {
     "vinyl": 4,
-    "card": 3,
     "coin": 2,
-    "toy": 4,
     "fossil": 4,
     "shell": 4,
     "mineral": 4,
 }
 
 LIBRARY_CATEGORIES = [
-    "mineral", "shell", "fossil", "card",
-    "vinyl", "coin", "toy", "other"
+    "mineral", "shell", "fossil",
+    "vinyl", "coin", "other"
 ]
 
 # ---------- DB ----------
@@ -1124,12 +1052,6 @@ SCHEMAS = {
             "size_range", "typical_locations", "paleoecology", "toxicity_safety", "description", "fact"
         ]
     },
-    "toy": {
-        "user": ["name", "purchase_price", "storage_or_display_location", "notes", "sku_upc"],
-        "api": [
-            "brand", "manufacturer", "franchise_license", "toy_line_series", "character_model", "variant", "release_year", "scale", "dimensions_mm", "weight_grams", "materials", "articulation_points", "battery_type_required", "age_rating", "accessories_included", "packaging_type", "packaging_variants", "colorway", "original_msrp", "priceguide_median_usd", "priceguide_low_high_usd", "description", "fact"
-        ]
-    },
     "vinyl": {
         "user": ["name", "purchase_price", "storage_or_display_location", "notes",
                  "runout_deadwax_code_side_a", "runout_deadwax_code_side_b", "barcode_ean_upc"],
@@ -1140,12 +1062,6 @@ SCHEMAS = {
         "user": ["name", "collected_date", "provenance", "purchase_price", "storage_or_display_location", "notes"],
         "api": [
             "country", "denomination", "year_minted", "mint_mark", "issuing_authority", "series_name", "coin_type", "catalog_numbers", "composition", "weight_grams", "diameter_mm", "thickness_mm", "shape", "edge_type", "obverse_design", "obverse_designer", "reverse_design", "reverse_designer", "orientation", "mintage", "mint_location", "minting_technique", "original_face_value", "current_melt_value_usd", "catalog_value_ranges", "auction_record_price_usd", "description", "fact"
-        ]
-    },
-    "card": {
-        "user": ["name", "purchase_price", "storage_or_display_location", "notes", "game_or_series", "set_name", "set_code", "card_number"],
-        "api": [
-            "game_or_series", "set_name", "set_code", "card_number", "card_title", "print_run_info", "release_year", "release_date_exact", "card_type", "rarity", "subtype_or_class", "holofoil_type", "variant_info", "dimensions_mm", "materials", "gameplay_text", "artist_or_photographer", "player_name", "team", "stats_or_gameplay_values", "original_pack_price_usd", "priceguide_median_usd", "priceguide_low_high_usd", "auction_record_price_usd", "description", "fact"
         ]
     },
     "other": {
@@ -1191,7 +1107,7 @@ class SlateButton(tk.Button):
 class SlateText(tk.Text):
     def __init__(self, master, **kw):
         super().__init__(master, **kw)
-        self.configure(bg=COLORS['bg_card'], fg=COLORS['fg_primary'], insertbackground=COLORS['accent_a'],
+        self.configure(bg=COLORS['bg_panel'], fg=COLORS['fg_primary'], insertbackground=COLORS['accent_a'],
                        selectbackground=COLORS['accent_b'], selectforeground='black',
                        font=('Consolas', 10), relief='flat', wrap='word', padx=10, pady=10,
                        highlightthickness=1, highlightbackground=COLORS['border'])
@@ -1200,7 +1116,7 @@ class SlateText(tk.Text):
 class SlateListbox(tk.Listbox):
     def __init__(self, master, **kw):
         super().__init__(master, **kw)
-        self.configure(bg=COLORS['bg_card'], fg=COLORS['fg_primary'], selectbackground=COLORS['accent_a'],
+        self.configure(bg=COLORS['bg_panel'], fg=COLORS['fg_primary'], selectbackground=COLORS['accent_a'],
                        selectforeground='black', relief='flat', font=('Segoe UI', 10), highlightthickness=1,
                        highlightbackground=COLORS['border'])
 
@@ -1208,7 +1124,7 @@ class SlateListbox(tk.Listbox):
 class SlateCanvas(tk.Canvas):
     def __init__(self, master, **kw):
         super().__init__(master, **kw)
-        self.configure(bg=COLORS['bg_card'], relief='flat',
+        self.configure(bg=COLORS['bg_panel'], relief='flat',
                        highlightthickness=1, highlightbackground=COLORS['border'])
 
 
@@ -1309,10 +1225,10 @@ class LibraryWindow(tk.Toplevel):
 
         tree_style.configure(
             'Library.Treeview',
-            background=COLORS['bg_card'],
-            fieldbackground=COLORS['bg_card'],
+            background=COLORS['bg_panel'],
+            fieldbackground=COLORS['bg_panel'],
             foreground=COLORS['fg_primary'],
-            bordercolor=COLORS.get('border', COLORS['bg_card']),
+            bordercolor=COLORS.get('border', COLORS['bg_panel']),
             rowheight=20
         )
         tree_style.map(
@@ -1522,12 +1438,8 @@ def _build_reference_query(category: str, term: str) -> str:
     t = term.strip()
     if c == "vinyl":
         return f"{t} album cover front high resolution"
-    if c == "card":
-        return f"{t} trading card front"
     if c == "coin":
         return f"{t} coin obverse reverse"
-    if c == "toy":
-        return f"{t} vintage toy figure photo"
     if c == "fossil":
         return f"{t} fossil specimen"
     if c == "shell":
@@ -1640,7 +1552,7 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
             pass
 
         # promote the local copy to img1, replacing any existing first slot
-        if cat in {"toy", "card", "fossil", "shell", "mineral"}:
+        if cat in {"fossil", "shell", "mineral"}:
             dest_first = os.path.join(item_dir, f"img1{up_ext}")
             try:
                 for f in glob.glob(os.path.join(item_dir, "img1.*")):
@@ -1688,23 +1600,8 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
                     cat, q), max_results=1) if q else []
                 if _save(res[0][0] if res else ""):
                     needed -= 1
-    elif cat == "card":
-        queries = [q_name, q_name, details.get("card_title", "")]
-        for q in queries:
-            q = q.strip()
-            res = ddg_image_search(_build_reference_query(
-                cat, q), max_results=1) if q else []
-            _save(res[0][0] if res else "")
     elif cat == "coin":
         queries = [q_name, q_name]
-        for q in queries:
-            q = q.strip()
-            res = ddg_image_search(_build_reference_query(
-                cat, q), max_results=1) if q else []
-            _save(res[0][0] if res else "")
-    elif cat == "toy":
-        queries = [q_name, details.get(
-            "character_model", ""), details.get("character_model", "")]
         for q in queries:
             q = q.strip()
             res = ddg_image_search(_build_reference_query(
@@ -1840,11 +1737,11 @@ class ItemDetailWindow(tk.Toplevel):
         SlateLabel(row, text=label).grid(
             row=0, column=0, sticky='e', padx=(8, 6))
         var = tk.StringVar(value="")
-        e = tk.Entry(row, textvariable=var, bg=COLORS['bg_card'], fg=COLORS['fg_primary'],
+        e = tk.Entry(row, textvariable=var, bg=COLORS['bg_panel'], fg=COLORS['fg_primary'],
                      insertbackground=COLORS['accent_a'], relief='flat', font=('Segoe UI', 10))
         e.grid(row=0, column=1, sticky='we')
         (self.meta_entries if is_api else self.details_entries)[key] = e
-        if not is_api and key in {"barcode_ean_upc", "sku_upc"}:
+        if not is_api and key in {"barcode_ean_upc"}:
             try:
                 btn = SlateButton(row, text="Scan",
                                   command=lambda k=key: self.scan_barcode(k))
@@ -2120,9 +2017,11 @@ class ItemDetailWindow(tk.Toplevel):
                            0 else f"Details collected. {filled} field(s) populated."))
 
     def collect_details(self):
-        alias_map = {'toys': 'toy', 'records': 'vinyl', 'record': 'vinyl',
-                     'shells': 'shell', 'minerals': 'mineral', 'fossils': 'fossil',
-                     'coins': 'coin', 'cards': 'card'}
+        alias_map = {
+            'records': 'vinyl', 'record': 'vinyl',
+            'shells': 'shell', 'minerals': 'mineral',
+            'fossils': 'fossil', 'coins': 'coin'
+        }
         self.collect_btn.config(state='disabled')
         self.status.config(text="Collecting details…")
         cat = alias_map.get((self.category or '').strip(
@@ -2152,14 +2051,8 @@ class ItemDetailWindow(tk.Toplevel):
                         self._last_meta_result = dict(meta)
                     except Exception:
                         self._last_meta_result = meta
-                elif cat == "toy":
-                    meta = enrich_toy(
-                        name_for_prompt, helpers, self.photo_path)
                 elif cat == "coin":
                     meta = enrich_coin(name_for_prompt, helpers)
-                elif cat == "card":
-                    meta = enrich_card(
-                        name_for_prompt, helpers, self.photo_path)
                 else:
                     meta = {}
             except Exception as e:
