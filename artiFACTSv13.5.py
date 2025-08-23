@@ -504,6 +504,12 @@ ALIASES = {
     "material":        ("materials", "composition", "made of", "material type"),
     "common_uses":     ("common uses", "uses", "typical uses", "applications", "function"),
     "toxicity_safety": ("toxicity safety", "toxicity", "safety", "hazards", "handling"),
+    "specimen_type":   ("type", "specimen type", "category", "group"),
+    "common_name":     ("common name", "vernacular name"),
+    "taxonomic_rank":  ("taxon rank", "rank", "order", "family", "clade"),
+    "size_range":      ("size", "dimensions", "size range"),
+    "identification_tips": ("identification", "id tips", "how to identify", "diagnostic features"),
+    "care_preservation":   ("care", "preservation", "storage care", "handling"),
 
     # vinyl
     "release_title": ("title", "album title", "release"),
@@ -589,6 +595,17 @@ def enrich_generic_openai(name: str, category: str, photo_path: str, helpers: di
             "\n- toxicity_safety = 'non-toxic' unless the specimen itself is hazardous."
             "\n- description = 1–2 plain sentences summarizing the fossil’s appearance and significance."
             "\n- fact = one short, interesting, verifiable tidbit (age, locality, or paleo note)."
+        )
+    elif category.lower() == "zoological":
+        guidance = (
+            "\nField guidance for zoological specimens:"
+            "\n- specimen_type = one of: insect, bone, tooth, antler/horn, feather, skin/taxidermy, other."
+            "\n- taxonomic_rank = safest confident level (e.g., Order or Family) if species is uncertain."
+            "\n- identification_tips = 1–2 cues visible to a non-expert."
+            "\n- care_preservation = short handling/storage tips (avoid UV/humidity/pests)."
+            "\n- toxicity_safety = 'non-toxic' unless specific hazards apply (e.g., dust precautions)."
+            "\n- description = 1–2 plain sentences on appearance/context."
+            "\n- fact = one short, verifiable tidbit."
         )
 
     user_text = (
@@ -804,11 +821,12 @@ PHOTO_SLOTS = {
     "fossil": 4,
     "shell": 4,
     "mineral": 4,
+    "zoological": 4,
 }
 
 LIBRARY_CATEGORIES = [
     "mineral", "shell", "fossil",
-    "vinyl", "coin", "other"
+    "vinyl", "coin", "zoological", "other"
 ]
 
 # ---------- DB ----------
@@ -1050,6 +1068,13 @@ SCHEMAS = {
         "api": [
             "scientific_name", "geological_period", "estimated_age", "fossil_type", "preservation_mode",
             "size_range", "typical_locations", "paleoecology", "toxicity_safety", "description", "fact"
+        ]
+    },
+    "zoological": {
+        "user": ["name", "collected_date", "provenance", "storage_or_display_location", "notes"],
+        "api": [
+            "scientific_name", "specimen_type", "common_name", "taxonomic_rank", "size_range",
+            "identification_tips", "material", "care_preservation", "toxicity_safety", "description", "fact"
         ]
     },
     "vinyl": {
@@ -1446,6 +1471,8 @@ def _build_reference_query(category: str, term: str) -> str:
         return f"{t} seashell specimen"
     if c == "mineral":
         return f"{t} mineral specimen macro"
+    if c == "zoological":
+        return f"{t} specimen"
     return t
 
 
@@ -1552,7 +1579,7 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
             pass
 
         # promote the local copy to img1, replacing any existing first slot
-        if cat in {"fossil", "shell", "mineral"}:
+        if cat in {"fossil", "shell", "mineral", "zoological"}:
             dest_first = os.path.join(item_dir, f"img1{up_ext}")
             try:
                 for f in glob.glob(os.path.join(item_dir, "img1.*")):
@@ -1637,6 +1664,37 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
             if len(all_cands) >= need:
                 break
 
+        for url in all_cands:
+            if need <= 0:
+                break
+            if _save(url):
+                need -= 1
+    elif cat == "zoological":
+        q1 = q_name
+        q2 = f"{q_name} specimen"
+        q3 = f"{q_name} closeup"
+        q4 = f"{q_name} museum"
+        need = max_slots - (slot - 1)
+        all_cands = []
+        for q in (q1, q2, q3, q4):
+            if need <= 0:
+                break
+            qq = q.strip()
+            if not qq:
+                continue
+            res = ddg_image_search(
+                _build_reference_query(cat, qq),
+                max_results=min(12, need * 4),
+            )
+            for (img_url, _page) in res:
+                nu = _norm_url(img_url)
+                if nu and nu not in seen_urls:
+                    all_cands.append(img_url)
+                    seen_urls.add(nu)
+                    if len(all_cands) >= need:
+                        break
+            if len(all_cands) >= need:
+                break
         for url in all_cands:
             if need <= 0:
                 break
@@ -2053,6 +2111,9 @@ class ItemDetailWindow(tk.Toplevel):
                         self._last_meta_result = meta
                 elif cat == "coin":
                     meta = enrich_coin(name_for_prompt, helpers)
+                elif cat == "zoological":
+                    meta = enrich_generic_openai(
+                        name_for_prompt, cat, self.photo_path, helpers, key_list)
                 else:
                     meta = {}
             except Exception as e:
