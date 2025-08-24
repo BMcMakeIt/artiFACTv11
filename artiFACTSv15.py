@@ -1504,48 +1504,138 @@ try:
 except Exception:
     openai = None
 
+# ---------------- Expert blurb: deterministic, item-aware fallback ----------------
+
+
+def _contains_any(s: str, words: tuple[str, ...]) -> bool:
+    sl = (s or "").lower()
+    return any(w in sl for w in words)
+
+
+def _fallback_blurb(category: str, item_name: str) -> str:
+    """Return a concise, safe, persona-styled blurb that references the *selected* item."""
+    c = (category or "other").strip().lower()
+    name = (item_name or "This specimen").strip()
+
+    if c in ("mineral", "minerals"):
+        return (
+            f"{name} is evaluated by hardness, luster, and cleavage. "
+            "Simple traits, but they’re the backbone of reliable identification."
+        )
+
+    if c in ("shell", "shells"):
+        if _contains_any(name, ("cowrie",)):
+            return (
+                f"{name} has a polished surface from growth against the mantle. "
+                "Its appeal is visual; the form is just the outcome of growth."
+            )
+        if _contains_any(name, ("scallop", "pecten")):
+            return (
+                f"{name} shows radial ribs and bilateral symmetry. "
+                "Symmetry reads as design; it’s merely how the shell lays itself down."
+            )
+        if _contains_any(name, ("conch", "whelk", "murex", "tulip")):
+            return (
+                f"{name} is a spiral gastropod shell. "
+                "Spiral thickening adds strength; ornament is incidental."
+            )
+        return (
+            f"{name} is calcium carbonate (aragonite) laid in layers. "
+            "Patterning is a byproduct of growth, not intention."
+        )
+
+    if c in ("fossil", "fossils"):
+        if _contains_any(name, ("tooth", "teeth")):
+            return (
+                f"{name} is a fossil tooth. Enamel preserves well, which is why tooth fossils are common; "
+                "shape records feeding mechanics more than species identity."
+            )
+        if _contains_any(name, ("ammonite",)):
+            return (
+                f"{name} is a coiled cephalopod shell fossil. Chambered construction is a standard case of buoyancy control."
+            )
+        if _contains_any(name, ("trilobite",)):
+            return (
+                f"{name} preserves dorsal exoskeleton segments. Molts and complete bodies are both found; complete ones are rarer."
+            )
+        if _contains_any(name, ("sand dollar", "echinoid", "sea biscuit")):
+            return (
+                f"{name} represents an echinoid test. Star patterns mark ambulacral areas; fine details survive best in quiet sediments."
+            )
+        return (
+            f"{name} records morphology and context from deep time. "
+            "Scientific value exceeds decorative value; specifics depend on locality."
+        )
+
+    if c in ("zoological",):
+        if _contains_any(name, ("tooth", "teeth", "fang", "tusk")):
+            return (
+                f"{name} is dentition. Enamel’s hardness aids preservation; wear facets and shape are more diagnostic than color."
+            )
+        if _contains_any(name, ("antler", "horn")):
+            return (
+                f"{name} shows growth rings and vascular traces. Breakage patterns reveal stress more reliably than surface polish."
+            )
+        if _contains_any(name, ("bone", "skull", "vertebra")):
+            return (
+                f"{name} is osseous tissue (hydroxyapatite). Articulations matter; isolated pieces are common, complete series are not."
+            )
+        if _contains_any(name, ("feather",)):
+            return (
+                f"{name} preserves vane and rachis structure. UV and pests are the main risks; climate control is more important than display."
+            )
+        if _contains_any(name, ("skin", "hide", "taxidermy")):
+            return (
+                f"{name} is preserved integument. Oils and light degrade keratin; storage practice determines longevity."
+            )
+        return (
+            f"{name} is a preserved organismal specimen. Diagnostic features, not mounting style, determine identification."
+        )
+
+    if c in ("vinyl",):
+        return (
+            f"On {name}, arrangement and tone shape the record more than volume. "
+            "The cut emphasizes the midrange where the songs actually live."
+        )
+
+    return (
+        f"{name} reflects a moment when collecting blurred curiosity and study. "
+        "Context explains why it was kept; the object itself stays unapologetically odd."
+    )
+
 
 def get_expert_blurb(category: str, item_name: str) -> str:
-    """Return an expert opinion blurb for the given item."""
-    print(f"DEBUG: get_expert_blurb called with category='{category}', item_name='{item_name}'")
-    
+    """
+    Return an expert opinion blurb for the given item.
+    If the OpenAI API is configured, we’ll use it; otherwise we fall back to a deterministic,
+    item-aware line so the text *always* matches the selected item.
+    """
     raw = (category or "other").lower().strip()
-    print(f"DEBUG: raw category: '{raw}'")
-    
-    # normalize app's singular categories to the EXPERT_PERSONAS keys
     cat_map = {"mineral": "minerals", "shell": "shells", "fossil": "fossils"}
-    cat = cat_map.get(raw, raw)  # passthrough for vinyl/zoological/other
-    print(f"DEBUG: normalized category: '{cat}'")
-    
-    info = EXPERT_PERSONAS.get(cat, EXPERT_PERSONAS["other"])
-    persona = info["persona"]
-    examples = info["examples"]
-    print(f"DEBUG: using persona: '{persona}' with {len(examples)} examples")
+    cat_key = cat_map.get(raw, raw)
 
     if openai and getattr(openai, "api_key", None):
-        print("DEBUG: OpenAI available, attempting API call")
+        info = EXPERT_PERSONAS.get(cat_key, EXPERT_PERSONAS["other"])
+        persona = info["persona"]
         prompt = (
-            f"You are the {persona}. Provide one or two sentences about the item named '{item_name}'. "
-            "Be concise and remain in persona."
+            f"You are the {persona}. "
+            f"Write 1–2 sentences about the item named '{item_name}'. "
+            "Be concise, factual, and consistent with the persona’s tone. No markdown."
         )
         try:
             resp = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo",
                 messages=[{"role": "system", "content": prompt}],
                 max_tokens=60,
-                temperature=0.7,
+                temperature=0.4,
             )
-            text = resp["choices"][0]["message"]["content"].strip()
+            text = (resp["choices"][0]["message"]["content"] or "").strip()
             if text:
-                print(f"DEBUG: OpenAI returned: {text}")
                 return text
-        except Exception as e:
-            print(f"DEBUG: OpenAI error: {e}")
+        except Exception:
             pass
 
-    fallback_text = random.choice(examples)
-    print(f"DEBUG: using fallback text: {fallback_text}")
-    return fallback_text
+    return _fallback_blurb(category, item_name)
 
 # ---------- DB ----------
 
