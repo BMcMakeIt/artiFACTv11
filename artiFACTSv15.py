@@ -3722,7 +3722,7 @@ class ClassifierApp:
         if self._rb_widgets:
             self._rb_widgets[0].invoke()
 
-    def _format_taxon_label(self, cand: dict) -> str:
+    def _format_taxon_label(self, cand: dict, include_conf: bool = True) -> str:
         sci = (cand.get("scientific_name") or "").strip()
         com = (cand.get("common_name") or "").strip()
         elem = (cand.get("element") or "").strip().lower()
@@ -3732,14 +3732,16 @@ class ClassifierApp:
             bits = [sci]
             if com:
                 bits.append(f"“{com}”")
-            bits.append(f"[{int(round(conf*100))}%]")
+            if include_conf:
+                bits.append(f"[{int(round(conf*100))}%]")
             return " ".join([b for b in bits if b]).strip()
 
         prefix = elem.capitalize()
         label = f"{prefix} — {sci}" if sci else prefix
         if com:
             label += f' “{com}”'
-        label += f" [{int(round(conf*100))}%]"
+        if include_conf:
+            label += f" [{int(round(conf*100))}%]"
         return label
 
     def _show_species_candidates(self, cands: list):
@@ -3786,10 +3788,11 @@ class ClassifierApp:
             self._safe_load_refs(query)
 
         for i, cand in enumerate(cands[:5]):
-            label = self._format_taxon_label(cand)
+            label = self._format_taxon_label(cand)  # display with confidence
+            clean_label = self._format_taxon_label(cand, include_conf=False)
             rb = tk.Radiobutton(
-                self.rb_frame, text=label, value=label, variable=var,
-                command=lambda v=label, c=cand: _select(v, c),
+                self.rb_frame, text=label, value=clean_label, variable=var,
+                command=lambda v=clean_label, c=cand: _select(v, c),
                 bg=COLORS['bg_panel'], fg=COLORS['fg_primary'],
                 selectcolor=COLORS['accent_a'],
                 activebackground=COLORS['bg_panel'], activeforeground=COLORS['fg_primary']
@@ -3799,9 +3802,9 @@ class ClassifierApp:
 
         # auto-select first species to keep refs in sync
         if cands:
-            first_label = self._format_taxon_label(cands[0])
-            var.set(first_label)
-            _select(first_label, cands[0])
+            first_clean = self._format_taxon_label(cands[0], include_conf=False)
+            var.set(first_clean)
+            _select(first_clean, cands[0])
 
     def open_detail_window(self):
         chosen = (self._chosen_label or "").strip()
