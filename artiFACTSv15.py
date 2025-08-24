@@ -2277,6 +2277,7 @@ class LibraryWindow(tk.Toplevel):
         self._blurb_popup = None
         self.current_blurb_text = ''
         self.blurb_visible = False
+        self.blurb_enabled = True
         self._blurb_item_id = None  # track which item the current blurb was generated for
         self._blurb_img_ref = None   # holds the Pillow-rendered background
 
@@ -2351,8 +2352,11 @@ class LibraryWindow(tk.Toplevel):
         }
         self.edit_btn.config(state='normal')
         self.hide_blurb()
-        self.blurb_btn.config(state='normal', text='Hide Expert Opinion')
-        self.blurb_visible = True
+        self.blurb_btn.config(state='normal')
+        self.blurb_visible = self.blurb_enabled
+        self.blurb_btn.config(
+            text='Hide Expert Opinion' if self.blurb_enabled else 'Show Expert Opinion'
+        )
         first_photo = (detail_map.get("img1_path") or detail_map.get("upload_path") or photo_path or "")
         self.current_blurb_text = get_expert_blurb(category, name, detail_map, first_photo)
         self._blurb_item_id = item_id
@@ -2582,22 +2586,23 @@ class LibraryWindow(tk.Toplevel):
 
     def toggle_blurb(self):
         print(f"DEBUG: toggle_blurb called, blurb_canvas: {self.blurb_canvas}, _current_item: {self._current_item}")
-        
+
         # If visible, hide it.
         if self.blurb_canvas:
             print("DEBUG: Hiding existing blurb")
-            self.blurb_visible = False
+            self.blurb_enabled = False
             self.hide_blurb()
             return
 
         # If hidden, (re)generate text if needed and draw.
         if self._current_item:
+            self.blurb_enabled = True
             current_id = self._current_item.get('id')
             if current_id != self._blurb_item_id or not self.current_blurb_text:
                 data = self._current_item
                 print(f"DEBUG: Generating blurb for item: {data.get('name')} ({data.get('category')})")
                 self.current_blurb_text = get_expert_blurb(
-                    data.get('category'), data.get('name'), data.get('details') or {}, 
+                    data.get('category'), data.get('name'), data.get('details') or {},
                     (data.get('details') or {}).get('img1_path') or (data.get('row') and data.get('row')[data.get('cols').index("photo_path")] if data.get('cols') and data.get('row') else "")
                 )
                 save_blurb_to_db(self._blurb_item_id, self.current_blurb_text)
