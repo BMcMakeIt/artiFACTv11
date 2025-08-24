@@ -2,7 +2,11 @@
 # artiFACTSv10.5a.py — pass-in-root pattern, tailored schemas only, scrollable details
 
 import re  # <— if not already present
-import openai_classifier_v1 as vc
+# import openai_classifier_v1 as vc  # Commented out - module not available
+# Stub function for when the classifier module is not available
+def vc_classify_image_stub(image_path, category):
+    return {'openai': {'guesses': []}}
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
@@ -1464,15 +1468,23 @@ except Exception:
 
 def get_expert_blurb(category: str, item_name: str) -> str:
     """Return an expert opinion blurb for the given item."""
+    print(f"DEBUG: get_expert_blurb called with category='{category}', item_name='{item_name}'")
+    
     raw = (category or "other").lower().strip()
+    print(f"DEBUG: raw category: '{raw}'")
+    
     # normalize app's singular categories to the EXPERT_PERSONAS keys
     cat_map = {"mineral": "minerals", "shell": "shells", "fossil": "fossils"}
     cat = cat_map.get(raw, raw)  # passthrough for vinyl/zoological/other
+    print(f"DEBUG: normalized category: '{cat}'")
+    
     info = EXPERT_PERSONAS.get(cat, EXPERT_PERSONAS["other"])
     persona = info["persona"]
     examples = info["examples"]
+    print(f"DEBUG: using persona: '{persona}' with {len(examples)} examples")
 
     if openai and getattr(openai, "api_key", None):
+        print("DEBUG: OpenAI available, attempting API call")
         prompt = (
             f"You are the {persona}. Provide one or two sentences about the item named '{item_name}'. "
             "Be concise and remain in persona."
@@ -1486,11 +1498,15 @@ def get_expert_blurb(category: str, item_name: str) -> str:
             )
             text = resp["choices"][0]["message"]["content"].strip()
             if text:
+                print(f"DEBUG: OpenAI returned: {text}")
                 return text
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG: OpenAI error: {e}")
             pass
 
-    return random.choice(examples)
+    fallback_text = random.choice(examples)
+    print(f"DEBUG: using fallback text: {fallback_text}")
+    return fallback_text
 
 # ---------- DB ----------
 
@@ -2228,6 +2244,12 @@ class LibraryWindow(tk.Toplevel):
         self.hide_blurb()
         if not text:
             return
+        
+        # Check if image_canvas exists and is properly configured
+        if not hasattr(self, 'image_canvas') or not self.image_canvas:
+            print("DEBUG: image_canvas not available")
+            return
+            
         try:
             bubble = tk.Canvas(self.image_canvas, bg='', highlightthickness=0)
             pad = 8
@@ -2266,8 +2288,26 @@ class LibraryWindow(tk.Toplevel):
 
             # Lock canvas size and mount it as a window on top of photos
             bubble.config(width=width, height=height)
-            x = 16 + 300 - 10   # top-right of first image tile
-            y = 20
+            
+            # Better positioning - ensure the blurb is visible
+            try:
+                canvas_width = self.image_canvas.winfo_width()
+                canvas_height = self.image_canvas.winfo_height()
+                
+                if canvas_width > 0 and canvas_height > 0:
+                    x = min(canvas_width - 20, 300)  # Right side with margin
+                    y = 20  # Top with margin
+                else:
+                    # Fallback positioning if canvas dimensions not available
+                    x = 300
+                    y = 20
+            except:
+                # Fallback positioning if canvas info not available
+                x = 300
+                y = 20
+            
+            print(f"DEBUG: Positioning blurb at ({x}, {y}) with dimensions {width}x{height}")
+                
             self._blurb_window = self.image_canvas.create_window(
                 x, y, window=bubble, anchor='ne'
             )
@@ -2279,8 +2319,13 @@ class LibraryWindow(tk.Toplevel):
 
             self.blurb_canvas = bubble
             self.blurb_btn.config(text='Hide Expert Opinion')
-        except Exception:
-            # Fail quietly; UI should never crash on cosmetic feature
+            print(f"DEBUG: Blurb drawn successfully at ({x}, {y}) with text: {text[:50]}...")
+            print(f"DEBUG: blurb_canvas: {self.blurb_canvas}, _blurb_window: {self._blurb_window}")
+        except Exception as e:
+            # Log the actual error for debugging
+            print(f"DEBUG: Error drawing blurb: {e}")
+            import traceback
+            traceback.print_exc()
             return
 
     def hide_blurb(self):
@@ -2298,8 +2343,11 @@ class LibraryWindow(tk.Toplevel):
         self.blurb_btn.config(text='Show Expert Opinion')
 
     def toggle_blurb(self):
+        print(f"DEBUG: toggle_blurb called, blurb_canvas: {self.blurb_canvas}, _current_item: {self._current_item}")
+        
         # If visible, hide it.
         if self.blurb_canvas:
+            print("DEBUG: Hiding existing blurb")
             self.blurb_visible = False
             self.hide_blurb()
             return
@@ -2308,13 +2356,21 @@ class LibraryWindow(tk.Toplevel):
         if self._current_item:
             if not self.current_blurb_text:
                 data = self._current_item
+                print(f"DEBUG: Generating blurb for item: {data.get('name')} ({data.get('category')})")
                 self.current_blurb_text = get_expert_blurb(
                     data.get('category'), data.get('name')
                 )
+                print(f"DEBUG: Generated blurb text: {self.current_blurb_text}")
+            else:
+                print(f"DEBUG: Using existing blurb text: {self.current_blurb_text}")
+            
             # Draw and mark visible
+            print("DEBUG: Drawing blurb...")
             self._draw_blurb(self.current_blurb_text)
             self.blurb_visible = True
             self.blurb_btn.config(text='Hide Expert Opinion')
+        else:
+            print("DEBUG: No current item selected")
 
     def edit_item(self):
         data = self._current_item
@@ -3447,7 +3503,7 @@ class ClassifierApp:
         if cat == "zoological" and self._species_mode:
             return
         cat = cat or 'other'
-        result = vc.classify_image(image_path, cat)
+        result = vc_classify_image_stub(image_path, cat)
         openai_block = result.get(
             'openai', {}) if isinstance(result, dict) else {}
         oa_guesses = (openai_block.get('guesses') or [])[:3]
