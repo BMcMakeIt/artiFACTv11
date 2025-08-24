@@ -2200,12 +2200,9 @@ class LibraryWindow(tk.Toplevel):
                 self.image_canvas.create_rectangle(
                     x, 10, x+300, 310, outline='#555', fill='#222')
         self.image_canvas.config(scrollregion=self.image_canvas.bbox('all'))
-
-        if self.blurb_visible:
-            self._draw_blurb(self.current_blurb_text)
-            self.blurb_btn.config(text='Hide Expert Opinion')
-        else:
-            self.hide_blurb()
+        self.hide_blurb()
+        self.blurb_visible = False
+        self.blurb_btn.config(text='Show Expert Opinion')
 
     def _round_rect(self, canvas, x1, y1, x2, y2, r=10, **kwargs):
         points = [
@@ -2228,69 +2225,86 @@ class LibraryWindow(tk.Toplevel):
         self.hide_blurb()
         if not text:
             return
-        bubble = tk.Canvas(self.image_canvas, bg='', highlightthickness=0)
-        pad = 8
-        max_w = 220
-        # Create text first (to measure), then background, then raise text
-        text_id = bubble.create_text(
-            pad, pad, text=text, width=max_w, anchor='nw',
-            font=('Segoe UI', 10), fill=COLORS['fg_primary']
-        )
-        bbox = bubble.bbox(text_id)  # (x1,y1,x2,y2)
-        width = bbox[2] + pad
-        height = bbox[3] + pad
-        # Rounded, semi-transparent background using stipple (Tk has no alpha in hex colors)
-        bg_id = self._round_rect(
-            bubble, 0, 0, width, height, 10,
-            fill='white', outline='', stipple='gray25'
-        )
-        bubble.tag_raise(text_id, bg_id)
+        try:
+            bubble = tk.Canvas(self.image_canvas, bg='', highlightthickness=0)
+            pad = 8
+            max_w = 220
+            text_id = bubble.create_text(
+                pad, pad, text=text, width=max_w,
+                anchor='nw', font=('Segoe UI', 10),
+                fill=COLORS['fg_primary']
+            )
+            bbox = bubble.bbox(text_id)
+            width = bbox[2] + pad
+            height = bbox[3] + pad
+            try:
+                # Simulated transparency using stipple (portable across Tk builds)
+                bg_id = self._round_rect(
+                    bubble, 0, 0, width, height, 10,
+                    fill='white', outline='',
+                    stipple='gray25'
+                )
+            except tk.TclError:
+                # Fallback: solid light background if stipple unsupported
+                bg_id = self._round_rect(
+                    bubble, 0, 0, width, height, 10,
+                    fill='#f5f5f5', outline=''
+                )
+            bubble.tag_raise(text_id, bg_id)
 
-        # Close “×”
-        close_id = bubble.create_text(
-            width - 4, 4, text='×', anchor='ne',
-            font=('Segoe UI', 10, 'bold'), fill='#333333'
-        )
-        bubble.tag_bind(close_id, '<Button-1>', lambda e: self.toggle_blurb())
+            # Close “×”
+            close_id = bubble.create_text(
+                width - 4, 4, text='×', anchor='ne',
+                font=('Segoe UI', 10, 'bold'), fill='#333333'
+            )
+            bubble.tag_bind(close_id, '<Button-1>', lambda e: self.toggle_blurb())
 
-        # Size and position the overlay canvas
-        bubble.config(width=width, height=height)
-        x = 16 + 300 - 10  # right edge of first image, slight inset
-        y = 20              # a smidge below the top
-        self._blurb_window = self.image_canvas.create_window(
-            x, y, window=bubble, anchor='ne'
-        )
-        self.blurb_canvas = bubble
+            # Size and position the overlay canvas
+            bubble.config(width=width, height=height)
+            # Try to anchor over the first slot; if scrollregion changes later, Tk repositions a window fine.
+            x = 16 + 300 - 10  # near top-right of the first image tile
+            y = 10 + 10
+            self._blurb_window = self.image_canvas.create_window(
+                x, y, window=bubble, anchor='ne'
+            )
+            self.blurb_canvas = bubble
+            self.blurb_btn.config(text='Hide Expert Opinion')
+        except Exception:
+            # Optional: ignore draw failures
+            pass
 
     def hide_blurb(self):
         if self.blurb_canvas is not None:
-            self.image_canvas.delete(self._blurb_window)
-            self.blurb_canvas.destroy()
+            try:
+                self.image_canvas.delete(self._blurb_window)
+            except Exception:
+                pass
+            try:
+                self.blurb_canvas.destroy()
+            except Exception:
+                pass
             self.blurb_canvas = None
+            self._blurb_window = None
         self.blurb_btn.config(text='Show Expert Opinion')
 
     def toggle_blurb(self):
-        # If visible, hide it
+        # If visible, hide it.
         if self.blurb_canvas:
             self.blurb_visible = False
             self.hide_blurb()
             return
-        # If nothing selected, nudge the user
-        if not self._current_item:
-            try:
-                messagebox.showinfo('Library', 'Select an item first.')
-            except Exception:
-                pass
-            return
-        # Show it
-        self.blurb_visible = True
-        if not self.current_blurb_text:
-            data = self._current_item
-            self.current_blurb_text = get_expert_blurb(
-                data.get('category'), data.get('name')
-            )
-        self._draw_blurb(self.current_blurb_text)
-        self.blurb_btn.config(text='Hide Expert Opinion')
+
+        # If hidden, (re)generate text if needed and draw.
+        if self._current_item:
+            if not self.current_blurb_text:
+                data = self._current_item
+                self.current_blurb_text = get_expert_blurb(
+                    data.get('category'), data.get('name')
+                )
+            # Draw and mark visible
+            self._draw_blurb(self.current_blurb_text)
+            self.blurb_visible = True
+            self.blurb_btn.config(text='Hide Expert Opinion')
 
     def edit_item(self):
         data = self._current_item
