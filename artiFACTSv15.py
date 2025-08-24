@@ -1396,12 +1396,13 @@ COLORS = {
     'accent_a':    '#22d3ee',
     'accent_b':    '#a78bfa',
     'accent_warn': '#f59e0b',
+    'blurb_fg':    '#0d3b66',
     'border':      '#1f2937',
 }
 
 # --- Blurb UI config (smooth, semi-transparent bubble) ---
 BLURB_MAX_W = 280                # wrap width for text
-BLURB_FONT  = ('Segoe UI', 11)   # crisp UI font
+BLURB_FONT  = ('Comic Sans MS', 11)   # hand-written style font
 BLURB_ALPHA = 220                # 0..255; 220 ≈ 86% opaque
 BLURB_RADIUS = 12                # corner radius
 BLURB_SHADOW_BLUR = 6            # shadow softness; 0 to disable
@@ -2315,7 +2316,7 @@ class LibraryWindow(tk.Toplevel):
             # Draw the text first (Tk keeps it crisp)
             text_id = bubble.create_text(
                 pad, pad, text=text, width=max_w,
-                anchor='nw', font=BLURB_FONT, fill=COLORS['fg_primary']
+                anchor='nw', font=BLURB_FONT, fill=COLORS['blurb_fg']
             )
             bubble.update_idletasks()
             # Measure laid-out text bbox → desired bubble size
