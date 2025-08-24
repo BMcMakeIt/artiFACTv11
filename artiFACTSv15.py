@@ -2251,7 +2251,11 @@ class LibraryWindow(tk.Toplevel):
             return
             
         try:
-            bubble = tk.Canvas(self.image_canvas, bg='', highlightthickness=0)
+            bubble = tk.Canvas(
+                self.image_canvas,
+                bg=self.image_canvas.cget('bg'),   # inherit parent bg; valid color name
+                highlightthickness=0
+            )
             pad = 8
             max_w = 220
 
