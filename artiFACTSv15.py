@@ -2222,7 +2222,9 @@ class LibraryWindow(tk.Toplevel):
         ]
         return canvas.create_polygon(points, smooth=True, **kwargs)
 
+
     def _draw_blurb(self, text):
+        # Don't proceed without content
         self.hide_blurb()
         if not text:
             return
@@ -2230,27 +2232,29 @@ class LibraryWindow(tk.Toplevel):
             bubble = tk.Canvas(self.image_canvas, bg='', highlightthickness=0)
             pad = 8
             max_w = 220
+
+            # Create text first, then force layout so bbox is valid
             text_id = bubble.create_text(
                 pad, pad, text=text, width=max_w,
                 anchor='nw', font=('Segoe UI', 10),
                 fill=COLORS['fg_primary']
             )
-            bbox = bubble.bbox(text_id)
-            width = bbox[2] + pad
-            height = bbox[3] + pad
+            bubble.update_idletasks()  # <-- ensure bbox is computed
+
+            bbox = bubble.bbox(text_id) or (0, 0, pad*2 + 40, pad*2 + 20)
+            width  = max((bbox[2] if len(bbox) > 2 else 0) + pad, 120)
+            height = max((bbox[3] if len(bbox) > 3 else 0) + pad, 36)
+
+            # Semi-transparent background via stipple (portable across Tk builds)
             try:
-                # Simulated transparency using stipple (portable across Tk builds)
                 bg_id = self._round_rect(
                     bubble, 0, 0, width, height, 10,
-                    fill='white', outline='',
-                    stipple='gray25'
+                    fill='white', outline='', stipple='gray25'
                 )
             except tk.TclError:
-                # Fallback: solid light background if stipple unsupported
-                bg_id = self._round_rect(
-                    bubble, 0, 0, width, height, 10,
-                    fill='#f5f5f5', outline=''
-                )
+                bg_id = self._round_rect(bubble, 0, 0, width, height, 10,
+                                         fill='#f5f5f5', outline='')
+
             bubble.tag_raise(text_id, bg_id)
 
             # Close “×”
@@ -2260,19 +2264,24 @@ class LibraryWindow(tk.Toplevel):
             )
             bubble.tag_bind(close_id, '<Button-1>', lambda e: self.toggle_blurb())
 
-            # Size and position the overlay canvas
+            # Lock canvas size and mount it as a window on top of photos
             bubble.config(width=width, height=height)
-            # Try to anchor over the first slot; if scrollregion changes later, Tk repositions a window fine.
-            x = 16 + 300 - 10  # near top-right of the first image tile
-            y = 10 + 10
+            x = 16 + 300 - 10   # top-right of first image tile
+            y = 20
             self._blurb_window = self.image_canvas.create_window(
                 x, y, window=bubble, anchor='ne'
             )
+            # Make sure it stays above image items
+            try:
+                self.image_canvas.tag_raise(self._blurb_window)
+            except Exception:
+                pass
+
             self.blurb_canvas = bubble
             self.blurb_btn.config(text='Hide Expert Opinion')
         except Exception:
-            # Optional: ignore draw failures
-            pass
+            # Fail quietly; UI should never crash on cosmetic feature
+            return
 
     def hide_blurb(self):
         if self.blurb_canvas is not None:
