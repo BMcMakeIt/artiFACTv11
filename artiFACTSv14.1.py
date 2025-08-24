@@ -646,6 +646,51 @@ PART_ELEMENTS = {"antler","horn","tooth","bone","skull","feather","skin","taxide
 WHOLE_ELEMENTS = {"insect","butterfly","moth","beetle","arachnid","spider","scorpion"}
 
 
+REF_KEYWORDS_BY_ELEMENT = {
+    "antler":  ["antler", "skull"],           # many antler photos show skull caps
+    "horn":    ["horn", "skull"],
+    "tooth":   ["tooth", "fossil"],           # 'fossil' boosts museum-style images if applicable
+    "bone":    ["bone", "skull"],             # generic bone -> include skull for context
+    "skull":   ["skull"],
+    "feather": ["feather", "specimen"],
+    "skin":    ["skin", "taxidermy"],
+    "taxidermy": ["taxidermy", "mount"]
+}
+
+def _ref_query_for_zoo(species: str, element: str) -> str:
+    """
+    Build the best reference-image query for zoological items.
+    - Whole organism -> species only
+    - Part -> species + element keywords
+    """
+    sp = (species or "").strip()
+    el = (element or "").strip().lower()
+    if not sp:
+        return el or "zoological specimen"
+    if not el or el in WHOLE_ELEMENTS:
+        return sp
+    kws = REF_KEYWORDS_BY_ELEMENT.get(el, [el])
+    return f"{sp} " + " ".join(kws)
+
+def _parse_element_species_label(label: str) -> tuple[str, str]:
+    """
+    Parse labels like 'Antler — Capreolus capreolus' into (element, species).
+    Returns ('', species) if no element prefix is found.
+    """
+    s = (label or "").strip()
+    # Try em dash / hyphen separators
+    for sep in ["—", " - ", " — ", "–", "-"]:
+        if sep in s:
+            left, right = s.split(sep, 1)
+            el = left.strip().lower()
+            # strip any trailing brackets or quotes from species part
+            sp = right.split("[", 1)[0].replace("“", "").replace("”", "").strip()
+            return (el, sp)
+    # No separator: assume the whole string is a species name
+    sp = s.split("[", 1)[0].replace("“", "").replace("”", "").strip()
+    return ("", sp)
+
+
 def guess_specimen_element(photo_path: str) -> dict:
     da = _img_to_data_url(photo_path) if photo_path and os.path.exists(photo_path) else ""
     if not da:
@@ -3013,14 +3058,24 @@ class ClassifierApp:
             return
         cat = (self.category_var.get() or "").lower().strip()
         sel = (term or "").strip()
-        if cat == "zoological" and _is_species_name(sel):
-            clean = sel
-        elif cat == "zoological":
-            clean = normalize_zoo_label(sel)
-            if not any(w in clean for w in ["specimen","butterfly","moth","beetle","insect","bone","tooth","antler","horn","feather","skin","taxidermy"]):
-                clean = f"{clean} specimen"
+
+        if cat == "zoological":
+            # Try to recover element + species from the last stored label
+            el, sp = ("", "")
+            try:
+                if getattr(self, "last_classification", None):
+                    lbl = self.last_classification.get("label", "")
+                    el, sp = _parse_element_species_label(lbl)
+            except Exception:
+                pass
+            # Fall back to the clicked text if species missing
+            if not sp:
+                sp = sel.split("[", 1)[0].replace("“", "").replace("”", "").strip()
+            # Build element-aware query (whole organisms remain species-only)
+            clean = _ref_query_for_zoo(sp, el)
         else:
             clean = _decontainerize_label(sel)
+
         self._safe_load_refs(clean)
 
     def load_reference_images(self, term: str):
@@ -3296,12 +3351,15 @@ class ClassifierApp:
 
         var = tk.StringVar(value="")
         def _select(val, cand):
-            self._chosen_label = val
-            sci = (cand.get("scientific_name") or "").strip()
+            self._chosen_label = val  # may include 'Antler — ...'
+            sci  = (cand.get("scientific_name") or "").strip()
             elem = (cand.get("element") or "").strip().lower()
+            # Store label for enrichment / Review & Save
             store_label = sci if (elem in WHOLE_ELEMENTS or not elem) else (f"{elem} — {sci}" if sci else elem)
-            self.last_classification = {"label": store_label, "confidence": cand.get("confidence",0)}
-            self._safe_load_refs(sci or store_label)
+            self.last_classification = {"label": store_label, "confidence": cand.get("confidence", 0)}
+            # Reference images:
+            query = _ref_query_for_zoo(sci, elem)
+            self._safe_load_refs(query)
 
         for i, cand in enumerate(cands[:5]):
             label = self._format_taxon_label(cand)
