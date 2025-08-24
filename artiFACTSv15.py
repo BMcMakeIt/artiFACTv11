@@ -1604,38 +1604,132 @@ def _fallback_blurb(category: str, item_name: str) -> str:
     )
 
 
-def get_expert_blurb(category: str, item_name: str) -> str:
-    """
-    Return an expert opinion blurb for the given item.
-    If the OpenAI API is configured, we’ll use it; otherwise we fall back to a deterministic,
-    item-aware line so the text *always* matches the selected item.
-    """
-    raw = (category or "other").lower().strip()
-    cat_map = {"mineral": "minerals", "shell": "shells", "fossil": "fossils"}
-    cat_key = cat_map.get(raw, raw)
+# ===== UNIQUE, ITEM-SPECIFIC EXPERT BLURBS (vision+details, with caching) =====
 
-    if openai and getattr(openai, "api_key", None):
-        info = EXPERT_PERSONAS.get(cat_key, EXPERT_PERSONAS["other"])
-        persona = info["persona"]
-        prompt = (
-            f"You are the {persona}. "
-            f"Write 1–2 sentences about the item named '{item_name}'. "
-            "Be concise, factual, and consistent with the persona’s tone. No markdown."
+def _first_photo_for_item(detail_map: dict, fallback_path: str) -> str:
+    """Prefer img1_path, then any img*_path, then fallback_path."""
+    if not isinstance(detail_map, dict):
+        return fallback_path
+    p = detail_map.get("img1_path", "")
+    if p and os.path.exists(p):
+        return p
+    # try other slots
+    for k, v in sorted(detail_map.items()):
+        if k.startswith("img") and k.endswith("_path") and v and os.path.exists(v):
+            return v
+    return fallback_path or ""
+
+
+def _item_context_for_blurb(category: str, name: str, details: dict) -> str:
+    """Compress per-category fields into a few high-signal bullets."""
+    cat = (category or "").lower()
+    d = details or {}
+    lines = [f"category: {cat}", f"name: {name}"]
+
+    def add(k, label=None):
+        v = (d.get(k) or "").strip()
+        if v:
+            lines.append(f"{(label or k).replace('_',' ')}: {v}")
+
+    if cat == "mineral":
+        for k in ("scientific_name","mohs_hardness","cleavage_fracture","habit_or_form","typical_colors","description","fact"):
+            add(k)
+    elif cat == "shell":
+        for k in ("scientific_name","subcategory","material","description","fact"):
+            add(k)
+    elif cat == "fossil":
+        for k in ("scientific_name","fossil_type","geological_period","estimated_age","preservation_mode","description","fact"):
+            add(k)
+    elif cat == "zoological":
+        for k in ("scientific_name","specimen_type","taxonomic_rank","identification_tips","size_range","material","description","fact"):
+            add(k)
+    elif cat == "vinyl":
+        for k in ("artist","release_title","release_year","genres","styles","description","fact"):
+            add(k)
+    else:
+        for k in ("description","fact"):
+            add(k)
+    # keep it short; the model just needs hooks to be specific
+    return "\n".join(lines[:14])
+
+
+def _persona_for_category(cat_key: str) -> str:
+    info = EXPERT_PERSONAS.get(cat_key, EXPERT_PERSONAS["other"])
+    return info.get("persona", "Archivist of the Strange")
+
+
+def _catkey(c: str) -> str:
+    m = {"mineral":"minerals","shell":"shells","fossil":"fossils"}
+    return m.get((c or "").lower(), (c or "other").lower())
+
+
+def generate_expert_blurb(category: str, item_name: str, details: dict | None = None, photo_path: str | None = None) -> str:
+    """
+    Item-aware blurb: tries OpenAI (with image context if available), else falls back
+    to deterministic per-item heuristics.
+    """
+    # Try cached field in details first
+    if isinstance(details, dict):
+        cached = (details.get("expert_blurb") or "").strip()
+        if cached:
+            return cached
+
+    # Build prompt
+    persona = _persona_for_category(_catkey(category))
+    context = _item_context_for_blurb(category, item_name, details or {})
+    sys = (
+        f"You are the {persona}. Write ONE or TWO sentences as a tight expert opinion blurb "
+        f"for the specific item below. Be concrete and item-specific by using the provided facts; "
+        f"avoid generic definitions. Tone must match the persona (no markdown, no title, 28–55 words)."
+    )
+    user = f"ITEM FACTS:\n{context}\n\nReturn only the blurb text."
+
+    # Try vision + details via the existing OpenAI client
+    try:
+        client = _openai_client()
+        content = [{"type": "input_text", "text": user}]
+        img = _first_photo_for_item(details or {}, photo_path or "")
+        if img and os.path.exists(img):
+            content.append({"type": "input_image", "image_url": _img_to_data_url(img)})
+        resp = client.responses.create(
+            model="gpt-4o-mini",
+            input=[{"role": "system", "content": [{"type":"input_text","text":sys}]},
+                   {"role": "user",   "content": content}],
+            temperature=0.35,
+            max_output_tokens=120
         )
-        try:
-            resp = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "system", "content": prompt}],
-                max_tokens=60,
-                temperature=0.4,
-            )
-            text = (resp["choices"][0]["message"]["content"] or "").strip()
-            if text:
-                return text
-        except Exception:
-            pass
+        text = (_safe_first_text(resp) or "").strip()
+        # sanity trim and guardrails
+        if 20 <= len(text) <= 320 and "\n" not in text:
+            return text
+    except Exception:
+        pass
 
+    # Deterministic safe fallback (still item-aware)
     return _fallback_blurb(category, item_name)
+
+
+def save_blurb_to_db(item_id: int, text: str):
+    """Store the generated blurb so it persists and renders instantly next time."""
+    if not (item_id and text):
+        return
+    try:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("""INSERT INTO item_details(item_id, key, value)
+                       VALUES(?,?,?)
+                       ON CONFLICT(item_id, key) DO UPDATE SET value=excluded.value""",
+                    (item_id, "expert_blurb", text))
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
+# OPTIONAL: keep a thin wrapper for legacy calls
+def get_expert_blurb(category: str, item_name: str, details: dict | None = None, photo_path: str | None = None) -> str:
+    return generate_expert_blurb(category, item_name, details, photo_path)
+
 
 # ---------- DB ----------
 
@@ -2274,8 +2368,11 @@ class LibraryWindow(tk.Toplevel):
         self.hide_blurb()
         self.blurb_btn.config(state='normal', text='Hide Expert Opinion')
         self.blurb_visible = True
-        self.current_blurb_text = get_expert_blurb(category, name)
+        first_photo = (detail_map.get("img1_path") or detail_map.get("upload_path") or photo_path or "")
+        self.current_blurb_text = get_expert_blurb(category, name, detail_map, first_photo)
         self._blurb_item_id = item_id
+        if self.current_blurb_text and (detail_map.get("expert_blurb","") != self.current_blurb_text):
+            save_blurb_to_db(item_id, self.current_blurb_text)
 
         self.info_text.config(state='normal')
         self.info_text.delete(1.0, tk.END)
@@ -2505,9 +2602,10 @@ class LibraryWindow(tk.Toplevel):
                 data = self._current_item
                 print(f"DEBUG: Generating blurb for item: {data.get('name')} ({data.get('category')})")
                 self.current_blurb_text = get_expert_blurb(
-                    data.get('category'), data.get('name')
+                    data.get('category'), data.get('name'), data.get('details') or {}, 
+                    (data.get('details') or {}).get('img1_path') or (data.get('row') and data.get('row')[data.get('cols').index("photo_path")] if data.get('cols') and data.get('row') else "")
                 )
-                self._blurb_item_id = current_id
+                save_blurb_to_db(self._blurb_item_id, self.current_blurb_text)
                 print(f"DEBUG: Generated blurb text: {self.current_blurb_text}")
             else:
                 print(f"DEBUG: Using existing blurb text: {self.current_blurb_text}")
