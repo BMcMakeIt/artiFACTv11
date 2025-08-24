@@ -2094,6 +2094,7 @@ class LibraryWindow(tk.Toplevel):
         self._blurb_window = None
         self.current_blurb_text = ''
         self.blurb_visible = False
+        self._blurb_item_id = None  # track which item the current blurb was generated for
         self._blurb_img_ref = None   # holds the Pillow-rendered background
 
         SlateTitle(right, text='Item Details').pack(anchor='w', pady=(6, 6))
@@ -2181,7 +2182,9 @@ class LibraryWindow(tk.Toplevel):
         self.edit_btn.config(state='normal')
         self.blurb_btn.config(state='normal')
         self.hide_blurb()
+        self.blurb_visible = False
         self.current_blurb_text = get_expert_blurb(category, name)
+        self._blurb_item_id = item_id
 
         self.info_text.config(state='normal')
         self.info_text.delete(1.0, tk.END)
@@ -2391,6 +2394,7 @@ class LibraryWindow(tk.Toplevel):
                 pass
             self.blurb_canvas = None
             self._blurb_window = None
+        self.blurb_visible = False
         self.blurb_btn.config(text='Show Expert Opinion')
 
     def toggle_blurb(self):
@@ -2405,21 +2409,26 @@ class LibraryWindow(tk.Toplevel):
 
         # If hidden, (re)generate text if needed and draw.
         if self._current_item:
-            if not self.current_blurb_text:
+            current_id = self._current_item.get('id')
+            if current_id != self._blurb_item_id or not self.current_blurb_text:
                 data = self._current_item
                 print(f"DEBUG: Generating blurb for item: {data.get('name')} ({data.get('category')})")
                 self.current_blurb_text = get_expert_blurb(
                     data.get('category'), data.get('name')
                 )
+                self._blurb_item_id = current_id
                 print(f"DEBUG: Generated blurb text: {self.current_blurb_text}")
             else:
                 print(f"DEBUG: Using existing blurb text: {self.current_blurb_text}")
-            
-            # Draw and mark visible
-            print("DEBUG: Drawing blurb...")
-            self._draw_blurb(self.current_blurb_text)
-            self.blurb_visible = True
-            self.blurb_btn.config(text='Hide Expert Opinion')
+
+            # Only draw if the selection hasn't changed mid-operation
+            if self._current_item and self._current_item.get('id') == self._blurb_item_id:
+                print("DEBUG: Drawing blurb...")
+                self._draw_blurb(self.current_blurb_text)
+                self.blurb_visible = True
+                self.blurb_btn.config(text='Hide Expert Opinion')
+            else:
+                print("DEBUG: Item changed before drawing; aborting blurb display")
         else:
             print("DEBUG: No current item selected")
 
