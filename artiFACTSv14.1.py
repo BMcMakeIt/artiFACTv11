@@ -19,6 +19,8 @@ import io
 import webbrowser
 import requests
 
+import random
+
 import numpy as np  # if not already imported
 
 CASE_TERMS_RE = re.compile(
@@ -1409,6 +1411,84 @@ LIBRARY_CATEGORIES = [
     "vinyl", "coin", "zoological", "other"
 ]
 
+# Expert personas and example blurbs
+EXPERT_PERSONAS = {
+    "minerals": {
+        "persona": "Measured Mineralogist",
+        "examples": [
+            "Quartz is one of the most widespread minerals on Earth. Its structure is basic, but it remains a cornerstone for identifying other specimens.",
+            "Fluorite is valued for its cubic form and fluorescence. Its scientific importance outweighs its modest economic use."
+        ]
+    },
+    "shells": {
+        "persona": "Reserved Marine Biologist",
+        "examples": [
+            "This cowrie was once used as currency. Its polished surface made it practical to carry, though it was valued more for appearance than durability.",
+            "Scallop shells are common along shorelines. Their symmetrical form is aesthetically pleasing, though it’s purely a byproduct of growth."
+        ]
+    },
+    "fossils": {
+        "persona": "Pragmatic Paleontologist",
+        "examples": [
+            "This ammonite is common in Cretaceous deposits. Its coiled shell structure is a textbook case of buoyancy control in marine invertebrates.",
+            "Knightia fossils are frequent in Green River Formation deposits. They represent entire schools preserved in a single event."
+        ]
+    },
+    "vinyl": {
+        "persona": "Music Critic",
+        "examples": [
+            "On this LP, the fuzzed-out guitar riffs defined proto-metal’s raw DNA."
+        ]
+    },
+    "zoological": {
+        "persona": "Museum Anatomist",
+        "examples": [
+            "Shark teeth are abundant because sharks continually shed them. The abundance makes them accessible, though it reduces their rarity.",
+            "Snake skins are preserved when the animal sheds in one piece. They are common finds, though rarely intact enough for study."
+        ]
+    },
+    "other": {
+        "persona": "Archivist of the Strange",
+        "examples": [
+            "This taxidermy mount reflects a period when curiosity cabinets blurred the line between science and spectacle.",
+            "This oddity reflects a period when private collections blurred the line between science and spectacle."
+        ]
+    }
+}
+
+try:
+    import openai  # optional; used if available
+except Exception:
+    openai = None
+
+
+def get_expert_blurb(category: str, item_name: str) -> str:
+    """Return an expert opinion blurb for the given item."""
+    cat = (category or "other").lower()
+    info = EXPERT_PERSONAS.get(cat, EXPERT_PERSONAS["other"])
+    persona = info["persona"]
+    examples = info["examples"]
+
+    if openai and getattr(openai, "api_key", None):
+        prompt = (
+            f"You are the {persona}. Provide one or two sentences about the item named '{item_name}'. "
+            "Be concise and remain in persona."
+        )
+        try:
+            resp = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "system", "content": prompt}],
+                max_tokens=60,
+                temperature=0.7,
+            )
+            text = resp["choices"][0]["message"]["content"].strip()
+            if text:
+                return text
+        except Exception:
+            pass
+
+    return random.choice(examples)
+
 # ---------- DB ----------
 
 
@@ -1931,6 +2011,15 @@ class LibraryWindow(tk.Toplevel):
         self.image_canvas.bind(
             '<B1-Motion>', lambda e: self.image_canvas.scan_dragto(e.x, e.y, gain=1))
 
+        self.blurb_btn = SlateButton(
+            right, text='Show Expert Opinion', command=self.toggle_blurb, state='disabled'
+        )
+        self.blurb_btn.pack(anchor='e', pady=(4, 0))
+        self.blurb_canvas = None
+        self._blurb_window = None
+        self.current_blurb_text = ''
+        self.blurb_visible = True
+
         SlateTitle(right, text='Item Details').pack(anchor='w', pady=(6, 6))
         details_wrap = SlateFrame(right)
         details_wrap.pack(fill=tk.BOTH, expand=True)
@@ -1972,11 +2061,15 @@ class LibraryWindow(tk.Toplevel):
         sel = self.tree.selection()
         if not sel:
             self.edit_btn.config(state='disabled')
+            self.hide_blurb()
+            self.blurb_btn.config(state='disabled')
             self._current_item = None
             return
         iid = sel[0]
         if iid.startswith('cat_'):
             self.edit_btn.config(state='disabled')
+            self.hide_blurb()
+            self.blurb_btn.config(state='disabled')
             self._current_item = None
             return
         item_id = int(iid)
@@ -2006,8 +2099,14 @@ class LibraryWindow(tk.Toplevel):
             "row": row,
             "cols": cols,
             "details": detail_map,
+            "name": name,
+            "category": category,
         }
         self.edit_btn.config(state='normal')
+        self.blurb_btn.config(state='normal')
+        self.hide_blurb()
+        self.blurb_visible = True
+        self.current_blurb_text = get_expert_blurb(category, name)
 
         self.info_text.config(state='normal')
         self.info_text.delete(1.0, tk.END)
@@ -2098,6 +2197,89 @@ class LibraryWindow(tk.Toplevel):
                 self.image_canvas.create_rectangle(
                     x, 10, x+300, 310, outline='#555', fill='#222')
         self.image_canvas.config(scrollregion=self.image_canvas.bbox('all'))
+
+        if self.blurb_visible:
+            self._draw_blurb(self.current_blurb_text)
+            self.blurb_btn.config(text='Hide Expert Opinion')
+        else:
+            self.hide_blurb()
+
+    def _round_rect(self, canvas, x1, y1, x2, y2, r=10, **kwargs):
+        points = [
+            x1 + r, y1,
+            x2 - r, y1,
+            x2, y1,
+            x2, y1 + r,
+            x2, y2 - r,
+            x2, y2,
+            x2 - r, y2,
+            x1 + r, y2,
+            x1, y2,
+            x1, y2 - r,
+            x1, y1 + r,
+            x1, y1,
+        ]
+        return canvas.create_polygon(points, smooth=True, **kwargs)
+
+    def _draw_blurb(self, text):
+        self.hide_blurb()
+        if not text:
+            return
+        bubble = tk.Canvas(self.image_canvas, bg='', highlightthickness=0)
+        pad = 8
+        max_w = 220
+        text_id = bubble.create_text(
+            pad,
+            pad,
+            text=text,
+            width=max_w,
+            anchor='nw',
+            font=('Segoe UI', 10),
+            fill=COLORS['fg_primary']
+        )
+        bbox = bubble.bbox(text_id)
+        width = bbox[2] + pad
+        height = bbox[3] + pad
+        self._round_rect(bubble, 0, 0, width, height, 10,
+                         fill='#ffffffcc', outline='')
+        close_id = bubble.create_text(
+            width - 4,
+            4,
+            text='×',
+            anchor='ne',
+            font=('Segoe UI', 10, 'bold'),
+            fill='#333333'
+        )
+        bubble.tag_bind(close_id, '<Button-1>', lambda e: self.toggle_blurb())
+        bubble.config(width=width, height=height)
+        x = 16 + 300 - 10
+        y = 10 + 10
+        self._blurb_window = self.image_canvas.create_window(
+            x, y, window=bubble, anchor='ne'
+        )
+        self.blurb_canvas = bubble
+
+    def hide_blurb(self):
+        if self.blurb_canvas is not None:
+            self.image_canvas.delete(self._blurb_window)
+            self.blurb_canvas.destroy()
+            self.blurb_canvas = None
+        self.blurb_btn.config(text='Show Expert Opinion')
+
+    def toggle_blurb(self):
+        if self.blurb_canvas:
+            self.blurb_visible = False
+            self.hide_blurb()
+        else:
+            if self._current_item:
+                self.blurb_visible = True
+                if not self.current_blurb_text:
+                    data = self._current_item
+                    self.current_blurb_text = get_expert_blurb(
+                        data.get('category'), data.get('name')
+                    )
+                self._draw_blurb(self.current_blurb_text)
+                self.blurb_btn.config(text='Hide Expert Opinion')
 
     def edit_item(self):
         data = self._current_item
