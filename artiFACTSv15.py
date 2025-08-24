@@ -2176,17 +2176,6 @@ class LibraryWindow(tk.Toplevel):
         self.image_canvas.bind('<Configure>', _reposition_blurb)
         self.image_canvas.bind('<Visibility>', _reposition_blurb)
 
-        self.blurb_btn = SlateButton(
-            right, text='Show Expert Opinion', command=self.toggle_blurb, state='disabled'
-        )
-        self.blurb_btn.pack(anchor='e', pady=(4, 0))
-        self.blurb_canvas = None
-        self._blurb_window = None
-        self.current_blurb_text = ''
-        self.blurb_visible = False
-        self._blurb_item_id = None  # track which item the current blurb was generated for
-        self._blurb_img_ref = None   # holds the Pillow-rendered background
-
         SlateTitle(right, text='Item Details').pack(anchor='w', pady=(6, 6))
         details_wrap = SlateFrame(right)
         details_wrap.pack(fill=tk.BOTH, expand=True)
@@ -2197,8 +2186,20 @@ class LibraryWindow(tk.Toplevel):
         info_scroll.pack(side='right', fill='y')
         self.info_text.configure(yscrollcommand=info_scroll.set)
 
-        self.edit_btn = SlateButton(right, text='Edit Item', command=self.edit_item, state='disabled')
-        self.edit_btn.pack(anchor='e', pady=(6, 0))
+        btn_row = SlateFrame(right)
+        btn_row.pack(anchor='e', pady=(6, 0))
+        self.edit_btn = SlateButton(btn_row, text='Edit Item', command=self.edit_item, state='disabled')
+        self.edit_btn.pack(side='right')
+        self.blurb_btn = SlateButton(
+            btn_row, text='Hide Expert Opinion', command=self.toggle_blurb, state='disabled'
+        )
+        self.blurb_btn.pack(side='right', padx=(0, 6))
+        self.blurb_canvas = None
+        self._blurb_window = None
+        self.current_blurb_text = ''
+        self.blurb_visible = False
+        self._blurb_item_id = None  # track which item the current blurb was generated for
+        self._blurb_img_ref = None   # holds the Pillow-rendered background
 
         self.photo_refs = []
         self._img_populating = set()
@@ -2270,9 +2271,9 @@ class LibraryWindow(tk.Toplevel):
             "category": category,
         }
         self.edit_btn.config(state='normal')
-        self.blurb_btn.config(state='normal')
         self.hide_blurb()
-        self.blurb_visible = False
+        self.blurb_btn.config(state='normal', text='Hide Expert Opinion')
+        self.blurb_visible = True
         self.current_blurb_text = get_expert_blurb(category, name)
         self._blurb_item_id = item_id
 
