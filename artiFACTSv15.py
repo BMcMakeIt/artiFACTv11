@@ -2108,7 +2108,6 @@ class LibraryWindow(tk.Toplevel):
         self.edit_btn.config(state='normal')
         self.blurb_btn.config(state='normal')
         self.hide_blurb()
-        self.blurb_visible = False
         self.current_blurb_text = get_expert_blurb(category, name)
 
         self.info_text.config(state='normal')
@@ -2200,9 +2199,11 @@ class LibraryWindow(tk.Toplevel):
                 self.image_canvas.create_rectangle(
                     x, 10, x+300, 310, outline='#555', fill='#222')
         self.image_canvas.config(scrollregion=self.image_canvas.bbox('all'))
-        self.hide_blurb()
-        self.blurb_visible = False
-        self.blurb_btn.config(text='Show Expert Opinion')
+        if self.blurb_visible:
+            self._draw_blurb(self.current_blurb_text)
+            self.blurb_btn.config(text='Hide Expert Opinion')
+        else:
+            self.hide_blurb()
 
     def _round_rect(self, canvas, x1, y1, x2, y2, r=10, **kwargs):
         points = [
