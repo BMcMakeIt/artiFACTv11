@@ -9,7 +9,7 @@ def vc_classify_image_stub(image_path, category):
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw, ImageFilter
 import sqlite3
 import cv2
 import os
@@ -1399,6 +1399,44 @@ COLORS = {
     'border':      '#1f2937',
 }
 
+# --- Blurb UI config (smooth, semi-transparent bubble) ---
+BLURB_MAX_W = 280                # wrap width for text
+BLURB_FONT  = ('Segoe UI', 11)   # crisp UI font
+BLURB_ALPHA = 220                # 0..255; 220 ≈ 86% opaque
+BLURB_RADIUS = 12                # corner radius
+BLURB_SHADOW_BLUR = 6            # shadow softness; 0 to disable
+
+# Position in the photos canvas: 'top-left'|'top-right'|'bottom-left'|'bottom-right'|'custom'
+BLURB_POSITION = 'bottom-left'
+# Pixels from the chosen corner (or absolute when using 'custom')
+BLURB_OFFSET_X, BLURB_OFFSET_Y = 24, 24
+
+def _blurb_anchor_and_xy(self, bubble_w: int, bubble_h: int):
+    """
+    Return (anchor, x, y) to place the blurb relative to the CURRENTLY VISIBLE
+    region of the photos canvas, so it tracks as you scroll.
+    """
+    # Visible viewport in canvas coords
+    vx = self.image_canvas.canvasx(0)
+    vy = self.image_canvas.canvasy(0)
+    vw = self.image_canvas.winfo_width()
+    vh = self.image_canvas.winfo_height()
+
+    pos = (BLURB_POSITION or 'bottom-left').lower().strip()
+    ax, ay = BLURB_OFFSET_X, BLURB_OFFSET_Y
+
+    if pos == 'top-left':
+        return 'nw', vx + ax, vy + ay
+    if pos == 'top-right':
+        return 'ne', vx + vw - ax, vy + ay
+    if pos == 'bottom-right':
+        return 'se', vx + vw - ax, vy + vh - ay
+    if pos == 'custom':
+        # Treat offsets as absolute canvas coords if you really want to pin it
+        return 'nw', BLURB_OFFSET_X, BLURB_OFFSET_Y
+    # default: bottom-left
+    return 'sw', vx + ax, vy + vh - ay
+
 DB_PATH = "collection_catalog.db"
 PHOTO_DIR = "photos"
 PHOTO_SLOTS = {
@@ -2030,6 +2068,23 @@ class LibraryWindow(tk.Toplevel):
         self.image_canvas.bind(
             '<B1-Motion>', lambda e: self.image_canvas.scan_dragto(e.x, e.y, gain=1))
 
+        def _reposition_blurb(_evt=None):
+            if self.blurb_canvas and self._blurb_window:
+                # Recompute anchor/coords for current viewport
+                W = int(self.blurb_canvas.cget('width') or 0) or self.blurb_canvas.winfo_width()
+                H = int(self.blurb_canvas.cget('height') or 0) or self.blurb_canvas.winfo_height()
+                anch, xx, yy = _blurb_anchor_and_xy(self, W, H)
+                try:
+                    self.image_canvas.itemconfigure(self._blurb_window, anchor=anch)
+                    self.image_canvas.coords(self._blurb_window, xx, yy)
+                    self.image_canvas.tag_raise(self._blurb_window)
+                except Exception:
+                    pass
+
+        # Reposition on size/scroll changes
+        self.image_canvas.bind('<Configure>', _reposition_blurb)
+        self.image_canvas.bind('<Visibility>', _reposition_blurb)
+
         self.blurb_btn = SlateButton(
             right, text='Show Expert Opinion', command=self.toggle_blurb, state='disabled'
         )
@@ -2038,6 +2093,7 @@ class LibraryWindow(tk.Toplevel):
         self._blurb_window = None
         self.current_blurb_text = ''
         self.blurb_visible = False
+        self._blurb_img_ref = None   # holds the Pillow-rendered background
 
         SlateTitle(right, text='Item Details').pack(anchor='w', pady=(6, 6))
         details_wrap = SlateFrame(right)
@@ -2239,83 +2295,77 @@ class LibraryWindow(tk.Toplevel):
         return canvas.create_polygon(points, smooth=True, **kwargs)
 
 
+
     def _draw_blurb(self, text):
-        # Don't proceed without content
+        # Reset previous bubble
         self.hide_blurb()
-        if not text:
+        if not text or not hasattr(self, 'image_canvas') or not self.image_canvas:
             return
-        
-        # Check if image_canvas exists and is properly configured
-        if not hasattr(self, 'image_canvas') or not self.image_canvas:
-            print("DEBUG: image_canvas not available")
-            return
-            
         try:
+            # Container for text + bg image
             bubble = tk.Canvas(
                 self.image_canvas,
-                bg=self.image_canvas.cget('bg'),   # inherit parent bg; valid color name
-                highlightthickness=0
+                bg=self.image_canvas.cget('bg'),
+                highlightthickness=0,
+                borderwidth=0
             )
-            pad = 8
-            max_w = 220
+            pad = 10
+            max_w = BLURB_MAX_W
 
-            # Create text first, then force layout so bbox is valid
+            # Draw the text first (Tk keeps it crisp)
             text_id = bubble.create_text(
                 pad, pad, text=text, width=max_w,
-                anchor='nw', font=('Segoe UI', 10),
-                fill=COLORS['fg_primary']
+                anchor='nw', font=BLURB_FONT, fill=COLORS['fg_primary']
             )
-            bubble.update_idletasks()  # <-- ensure bbox is computed
+            bubble.update_idletasks()
+            # Measure laid-out text bbox → desired bubble size
+            tb = bubble.bbox(text_id) or (0, 0, pad*2 + 40, pad*2 + 20)
+            txt_w = max((tb[2] if len(tb) > 2 else 0), 40)
+            txt_h = max((tb[3] if len(tb) > 3 else 0), 20)
+            bubble_w = txt_w + pad
+            bubble_h = txt_h + pad
 
-            bbox = bubble.bbox(text_id) or (0, 0, pad*2 + 40, pad*2 + 20)
-            width  = max((bbox[2] if len(bbox) > 2 else 0) + pad, 120)
-            height = max((bbox[3] if len(bbox) > 3 else 0) + pad, 36)
+            # --- High quality background via Pillow (RGBA with alpha) ---
+            # Create transparent canvas
+            W = bubble_w
+            H = bubble_h
+            img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
 
-            # Semi-transparent background via stipple (portable across Tk builds)
-            try:
-                bg_id = self._round_rect(
-                    bubble, 0, 0, width, height, 10,
-                    fill='white', outline='', stipple='gray25'
+            # Optional soft shadow (draw under the rounded rect, then blur)
+            if BLURB_SHADOW_BLUR > 0:
+                sh = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+                sd = ImageDraw.Draw(sh)
+                sd.rounded_rectangle(
+                    [2, 2, W-2, H-2], radius=BLURB_RADIUS,
+                    fill=(0, 0, 0, 110)
                 )
-            except tk.TclError:
-                bg_id = self._round_rect(bubble, 0, 0, width, height, 10,
-                                         fill='#f5f5f5', outline='')
+                sh = sh.filter(ImageFilter.GaussianBlur(BLURB_SHADOW_BLUR))
+                img.alpha_composite(sh)
 
-            bubble.tag_raise(text_id, bg_id)
+            # Foreground rounded rect with semi-transparency
+            draw.rounded_rectangle(
+                [0, 0, W-1, H-1], radius=BLURB_RADIUS,
+                fill=(255, 255, 255, BLURB_ALPHA)
+            )
 
-            # Close “×”
+            # Convert to Tk image and place behind the text
+            tk_bg = ImageTk.PhotoImage(img)
+            self._blurb_img_ref = tk_bg  # keep alive
+            bubble.create_image(0, 0, image=tk_bg, anchor='nw')
+            bubble.tag_raise(text_id)  # ensure text is above the bg image
+
+            # Close “×” in the corner (text stays crisp)
             close_id = bubble.create_text(
-                width - 4, 4, text='×', anchor='ne',
+                W - 6, 6, text='×', anchor='ne',
                 font=('Segoe UI', 10, 'bold'), fill='#333333'
             )
             bubble.tag_bind(close_id, '<Button-1>', lambda e: self.toggle_blurb())
 
-            # Lock canvas size and mount it as a window on top of photos
-            bubble.config(width=width, height=height)
-            
-            # Better positioning - ensure the blurb is visible
-            try:
-                canvas_width = self.image_canvas.winfo_width()
-                canvas_height = self.image_canvas.winfo_height()
-                
-                if canvas_width > 0 and canvas_height > 0:
-                    x = min(canvas_width - 20, 300)  # Right side with margin
-                    y = 20  # Top with margin
-                else:
-                    # Fallback positioning if canvas dimensions not available
-                    x = 300
-                    y = 20
-            except:
-                # Fallback positioning if canvas info not available
-                x = 300
-                y = 20
-            
-            print(f"DEBUG: Positioning blurb at ({x}, {y}) with dimensions {width}x{height}")
-                
-            self._blurb_window = self.image_canvas.create_window(
-                x, y, window=bubble, anchor='ne'
-            )
-            # Make sure it stays above image items
+            # Lock bubble size, then mount it in the photos canvas
+            bubble.config(width=W, height=H)
+            anchor, x, y = _blurb_anchor_and_xy(self, W, H)
+            self._blurb_window = self.image_canvas.create_window(x, y, window=bubble, anchor=anchor)
             try:
                 self.image_canvas.tag_raise(self._blurb_window)
             except Exception:
@@ -2323,13 +2373,9 @@ class LibraryWindow(tk.Toplevel):
 
             self.blurb_canvas = bubble
             self.blurb_btn.config(text='Hide Expert Opinion')
-            print(f"DEBUG: Blurb drawn successfully at ({x}, {y}) with text: {text[:50]}...")
-            print(f"DEBUG: blurb_canvas: {self.blurb_canvas}, _blurb_window: {self._blurb_window}")
         except Exception as e:
-            # Log the actual error for debugging
-            print(f"DEBUG: Error drawing blurb: {e}")
-            import traceback
-            traceback.print_exc()
+            # Cosmetic feature: never crash the UI
+            # print("Blurb draw failed:", e)
             return
 
     def hide_blurb(self):
