@@ -1579,6 +1579,60 @@ def save_item_full(name: str, category: str, photo_path: str, details: dict) -> 
     return item_id
 
 
+def update_item_full(item_id: int, name: str, category: str, photo_path: str, details: dict) -> int:
+    """Update an existing item and its details by ``item_id``.
+
+    All fields in both the ``items`` table and ``item_details`` may be
+    modified.  Category changes will move the associated photo directory.
+    """
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT category, photo_path FROM items WHERE id=?", (item_id,))
+    row = cur.fetchone()
+    old_cat = row[0] if row else ""
+    cur.execute("UPDATE items SET name=?, category=?, photo_path=? WHERE id=?",
+                (name, category, photo_path, item_id))
+    con.commit()
+    con.close()
+
+    # Move photo directory if category changed
+    if old_cat and old_cat.lower() != (category or '').lower():
+        old_dir = os.path.join(PHOTO_DIR, old_cat.lower(), str(item_id))
+        new_dir = os.path.join(PHOTO_DIR, category.lower(), str(item_id))
+        if os.path.exists(old_dir):
+            os.makedirs(os.path.dirname(new_dir), exist_ok=True)
+            shutil.move(old_dir, new_dir)
+
+    details = details or {}
+    item_dir_abs = os.path.abspath(os.path.join(
+        PHOTO_DIR, category.lower(), str(item_id)))
+    uploaded_arg = photo_path if (
+        photo_path and os.path.commonpath([
+            os.path.abspath(photo_path), item_dir_abs]) == item_dir_abs
+    ) else photo_path
+    photo_meta = populate_photo_slots(
+        item_id, category, name, details, uploaded_arg)
+    details.update(photo_meta)
+    if details:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("PRAGMA table_info(items)")
+        cols = {r[1] for r in cur.fetchall()}
+        for k, v in details.items():
+            if not k:
+                continue
+            if k in cols:
+                cur.execute(f"UPDATE items SET {k}=? WHERE id=?",
+                            (str(v) if v is not None else "", item_id))
+            cur.execute("""INSERT INTO item_details(item_id, key, value)
+                           VALUES(?,?,?)
+                           ON CONFLICT(item_id, key) DO UPDATE SET value=excluded.value""",
+                        (item_id, k, str(v) if v is not None else ""))
+        con.commit()
+        con.close()
+    return item_id
+
+
 # ---------- Tailored per-category schemas ONLY ----------
 HIDDEN_META_KEYS = {"discogs_release_id", "discogs_url"}
 
@@ -1842,9 +1896,13 @@ class LibraryWindow(tk.Toplevel):
         info_scroll.pack(side='right', fill='y')
         self.info_text.configure(yscrollcommand=info_scroll.set)
 
+        self.edit_btn = SlateButton(right, text='Edit Item', command=self.edit_item, state='disabled')
+        self.edit_btn.pack(anchor='e', pady=(6, 0))
+
         self.photo_refs = []
         self._img_populating = set()
         self.item_rows = {}
+        self._current_item = None
         self.load_items()
 
     def load_items(self):
@@ -1868,9 +1926,13 @@ class LibraryWindow(tk.Toplevel):
     def display_item_info(self, event):
         sel = self.tree.selection()
         if not sel:
+            self.edit_btn.config(state='disabled')
+            self._current_item = None
             return
         iid = sel[0]
         if iid.startswith('cat_'):
+            self.edit_btn.config(state='disabled')
+            self._current_item = None
             return
         item_id = int(iid)
         item_id, name, category = self.item_rows.get(
@@ -1893,6 +1955,14 @@ class LibraryWindow(tk.Toplevel):
                 "SELECT key, value FROM item_details WHERE item_id=?", (item_id,))
             detail_map = {k: v for k, v in cur.fetchall()}
         conn.close()
+
+        self._current_item = {
+            "id": item_id,
+            "row": row,
+            "cols": cols,
+            "details": detail_map,
+        }
+        self.edit_btn.config(state='normal')
 
         self.info_text.config(state='normal')
         self.info_text.delete(1.0, tk.END)
@@ -1983,6 +2053,38 @@ class LibraryWindow(tk.Toplevel):
                 self.image_canvas.create_rectangle(
                     x, 10, x+300, 310, outline='#555', fill='#222')
         self.image_canvas.config(scrollregion=self.image_canvas.bbox('all'))
+
+    def edit_item(self):
+        data = self._current_item
+        if not data:
+            return
+        item_id = data.get("id")
+        row = data.get("row") or []
+        cols = data.get("cols") or []
+        detail_map = data.get("details") or {}
+        name = row[cols.index("name")] if row and "name" in cols else ""
+        category = row[cols.index("category")] if row and "category" in cols else ""
+        photo_path = row[cols.index("photo_path")] if row and "photo_path" in cols else ""
+        initial_details = {}
+        if row:
+            for i, col in enumerate(cols):
+                if col in ("id", "added_on", "photo_path", "category", "name"):
+                    continue
+                val = row[i]
+                if val:
+                    initial_details[col] = val
+        initial_details.update(detail_map)
+
+        def _reload():
+            sel = str(item_id)
+            self.load_items()
+            if self.tree.exists(sel):
+                self.tree.selection_set(sel)
+                self.display_item_info(None)
+
+        ItemDetailWindow(self, initial_name=name, category=category,
+                         photo_path=photo_path, item_id=item_id,
+                         initial_details=initial_details, on_save=_reload)
 
 
 # ---- DDG image search ----
@@ -2244,22 +2346,35 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
 
 
 class ItemDetailWindow(tk.Toplevel):
-    def __init__(self, master, initial_name: str, category: str, photo_path: str, last_classification=None):
+    def __init__(self, master, initial_name: str, category: str, photo_path: str,
+                 last_classification=None, item_id: int | None = None,
+                 initial_details: dict | None = None, on_save=None):
         super().__init__(master)
         self.title("Item details")
         self.configure(bg=COLORS['bg_app'])
         self.minsize(900, 650)
-        self.category = category
         self.photo_path = photo_path
         self.last_classification = last_classification
         self.details_entries = {}
         self.meta_entries = {}
+        self.item_id = item_id
+        self._on_saved = on_save
+        self.category_var = tk.StringVar(value=category)
 
         # Header
         header = SlateFrame(self)
         header.pack(fill=tk.X, padx=12, pady=(12, 0))
         SlateTitle(header, text=f"Review & Save Item — {category.capitalize()}").pack(
             anchor='w', pady=(4, 6))
+
+        cat_row = SlateFrame(self)
+        cat_row.pack(fill=tk.X, padx=12, pady=(0, 4))
+        SlateLabel(cat_row, text="Category").grid(row=0, column=0, sticky='e', padx=(8, 4))
+        self.category_combo = ttk.Combobox(
+            cat_row, textvariable=self.category_var, state='readonly',
+            values=list(SCHEMAS.keys()), width=18
+        )
+        self.category_combo.grid(row=0, column=1, sticky='w', padx=(0, 12))
 
         # Photo
         row_photo = SlateFrame(self)
@@ -2298,7 +2413,7 @@ class ItemDetailWindow(tk.Toplevel):
         self.api_frame = SlateFrame(right)
         self.api_frame.pack(fill=tk.X, padx=6, pady=(0, 6))
 
-        schema = SCHEMAS.get(self.category.lower(), SCHEMAS["other"])
+        schema = SCHEMAS.get(self.category_var.get().lower(), SCHEMAS["other"])
         for k in schema["user"]:
             self._add_field(self.user_frame, k, is_api=False)
         for k in schema["api"]:
@@ -2310,6 +2425,18 @@ class ItemDetailWindow(tk.Toplevel):
             e = self.details_entries["name"]
             e.delete(0, tk.END)
             e.insert(0, initial_name)
+
+        # Populate any existing details
+        initial_details = initial_details or {}
+        for k, v in initial_details.items():
+            if k in self.details_entries:
+                e = self.details_entries[k]
+                e.delete(0, tk.END)
+                e.insert(0, v)
+            elif k in self.meta_entries:
+                e = self.meta_entries[k]
+                e.delete(0, tk.END)
+                e.insert(0, v)
 
         # Pinned buttons
         btns = SlateFrame(self)
@@ -2619,8 +2746,8 @@ class ItemDetailWindow(tk.Toplevel):
         }
         self.collect_btn.config(state='disabled')
         self.status.config(text="Collecting details…")
-        cat = alias_map.get((self.category or '').strip(
-        ).lower(), (self.category or '').strip().lower())
+        raw_cat = (self.category_var.get() or '').strip()
+        cat = alias_map.get(raw_cat.lower(), raw_cat.lower())
         helpers = self._gather_user_helpers()
         raw_name = helpers.get("name", "").strip()
         name_for_prompt = raw_name or "(unnamed item)"
@@ -2705,9 +2832,16 @@ class ItemDetailWindow(tk.Toplevel):
             pass
 
         try:
-            item_id = save_item_full(
-                name, self.category, self.photo_path, details)
+            cat = self.category_var.get()
+            if self.item_id is not None:
+                item_id = update_item_full(
+                    self.item_id, name, cat, self.photo_path, details)
+            else:
+                item_id = save_item_full(
+                    name, cat, self.photo_path, details)
             messagebox.showinfo("Saved", f"Item saved (id {item_id}).")
+            if callable(self._on_saved):
+                self._on_saved()
             self.destroy()
         except Exception as e:
             messagebox.showerror("DB error", str(e))
