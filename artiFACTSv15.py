@@ -2253,22 +2253,7 @@ class LibraryWindow(tk.Toplevel):
         self.image_canvas.bind(
             '<B1-Motion>', lambda e: self.image_canvas.scan_dragto(e.x, e.y, gain=1))
 
-        def _reposition_blurb(_evt=None):
-            if self.blurb_canvas and self._blurb_window:
-                # Recompute anchor/coords for current viewport
-                W = int(self.blurb_canvas.cget('width') or 0) or self.blurb_canvas.winfo_width()
-                H = int(self.blurb_canvas.cget('height') or 0) or self.blurb_canvas.winfo_height()
-                anch, xx, yy = _blurb_anchor_and_xy(self, W, H)
-                try:
-                    self.image_canvas.itemconfigure(self._blurb_window, anchor=anch)
-                    self.image_canvas.coords(self._blurb_window, xx, yy)
-                    self.image_canvas.tag_raise(self._blurb_window)
-                except Exception:
-                    pass
-
-        # Reposition on size/scroll changes
-        self.image_canvas.bind('<Configure>', _reposition_blurb)
-        self.image_canvas.bind('<Visibility>', _reposition_blurb)
+        # Expert opinion is now shown in a pop-up window, so no repositioning needed
 
         SlateTitle(right, text='Item Details').pack(anchor='w', pady=(6, 6))
         details_wrap = SlateFrame(right)
@@ -2289,7 +2274,7 @@ class LibraryWindow(tk.Toplevel):
         )
         self.blurb_btn.pack(side='right', padx=(0, 6))
         self.blurb_canvas = None
-        self._blurb_window = None
+        self._blurb_popup = None
         self.current_blurb_text = ''
         self.blurb_visible = False
         self._blurb_item_id = None  # track which item the current blurb was generated for
@@ -2489,99 +2474,109 @@ class LibraryWindow(tk.Toplevel):
 
 
     def _draw_blurb(self, text):
-        # Reset previous bubble
+        """Render the expert blurb inside a dedicated pop-up window."""
         self.hide_blurb()
-        if not text or not hasattr(self, 'image_canvas') or not self.image_canvas:
+        if not text:
             return
         try:
-            # Container for text + bg image
-            bubble = tk.Canvas(
-                self.image_canvas,
-                bg=self.image_canvas.cget('bg'),
-                highlightthickness=0,
-                borderwidth=0
-            )
+            popup = tk.Toplevel(self)
+            popup.title("Expert Opinion")
+            popup.configure(bg=COLORS['bg_app'])
+            popup.resizable(False, False)
+            popup.transient(self)
+            popup.protocol("WM_DELETE_WINDOW", self.toggle_blurb)
+
+            frame = SlateFrame(popup)
+            frame.pack(padx=10, pady=10)
+
+            # --- simple expert silhouette ---
+            expert = tk.Canvas(frame, width=60, height=60,
+                               bg=frame.cget('bg'), highlightthickness=0)
+            expert.pack(side='left', padx=(0, 10))
+            fg = COLORS['blurb_fg']
+            expert.create_oval(15, 0, 45, 30, fill=fg, outline=fg)
+            expert.create_rectangle(18, 30, 42, 58, fill=fg, outline=fg)
+
+            # --- speech bubble with text ---
+            bubble = tk.Canvas(frame, bg=frame.cget('bg'),
+                               highlightthickness=0, borderwidth=0)
+            bubble.pack(side='left')
+
             pad = 10
             max_w = BLURB_MAX_W
-
-            # Draw the text first (Tk keeps it crisp)
             text_id = bubble.create_text(
-                pad, pad, text=text, width=max_w,
+                0, 0, text=text, width=max_w,
                 anchor='nw', font=BLURB_FONT, fill=COLORS['blurb_fg']
             )
             bubble.update_idletasks()
-            # Measure laid-out text bbox → desired bubble size
             tb = bubble.bbox(text_id) or (0, 0, pad*2 + 40, pad*2 + 20)
-            txt_w = max((tb[2] if len(tb) > 2 else 0), 40)
-            txt_h = max((tb[3] if len(tb) > 3 else 0), 20)
-            bubble_w = txt_w + pad
-            bubble_h = txt_h + pad
-
-            # --- High quality background via Pillow (RGBA with alpha) ---
-            # Create transparent canvas
-            W = bubble_w
+            txt_w = max(tb[2] - tb[0], 40)
+            txt_h = max(tb[3] - tb[1], 20)
+            bubble_w = txt_w + pad * 2
+            bubble_h = txt_h + pad * 2
+            tail_w = 12
+            W = bubble_w + tail_w
             H = bubble_h
+
             img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
 
-            # Optional soft shadow (draw under the rounded rect, then blur)
             if BLURB_SHADOW_BLUR > 0:
                 sh = Image.new('RGBA', (W, H), (0, 0, 0, 0))
                 sd = ImageDraw.Draw(sh)
                 sd.rounded_rectangle(
-                    [2, 2, W-2, H-2], radius=BLURB_RADIUS,
+                    [tail_w + 2, 2, W - 2, H - 2], radius=BLURB_RADIUS,
+                    fill=(0, 0, 0, 110)
+                )
+                sd.polygon(
+                    [(tail_w, H // 2 - 10), (2, H // 2), (tail_w, H // 2 + 10)],
                     fill=(0, 0, 0, 110)
                 )
                 sh = sh.filter(ImageFilter.GaussianBlur(BLURB_SHADOW_BLUR))
                 img.alpha_composite(sh)
 
-            # Foreground rounded rect with semi-transparency
             draw.rounded_rectangle(
-                [0, 0, W-1, H-1], radius=BLURB_RADIUS,
+                [tail_w, 0, W - 1, H - 1], radius=BLURB_RADIUS,
+                fill=(255, 255, 255, BLURB_ALPHA)
+            )
+            draw.polygon(
+                [(tail_w, H // 2 - 10), (0, H // 2), (tail_w, H // 2 + 10)],
                 fill=(255, 255, 255, BLURB_ALPHA)
             )
 
-            # Convert to Tk image and place behind the text
             tk_bg = ImageTk.PhotoImage(img)
-            self._blurb_img_ref = tk_bg  # keep alive
+            self._blurb_img_ref = tk_bg
+            bubble.config(width=W, height=H)
             bubble.create_image(0, 0, image=tk_bg, anchor='nw')
-            bubble.tag_raise(text_id)  # ensure text is above the bg image
+            bubble.coords(text_id, tail_w + pad, pad)
+            bubble.tag_raise(text_id)
 
-            # Close “×” in the corner (text stays crisp)
             close_id = bubble.create_text(
                 W - 6, 6, text='×', anchor='ne',
                 font=('Segoe UI', 10, 'bold'), fill='#333333'
             )
             bubble.tag_bind(close_id, '<Button-1>', lambda e: self.toggle_blurb())
 
-            # Lock bubble size, then mount it in the photos canvas
-            bubble.config(width=W, height=H)
-            anchor, x, y = _blurb_anchor_and_xy(self, W, H)
-            self._blurb_window = self.image_canvas.create_window(x, y, window=bubble, anchor=anchor)
-            try:
-                self.image_canvas.tag_raise(self._blurb_window)
-            except Exception:
-                pass
-
             self.blurb_canvas = bubble
+            self._blurb_popup = popup
             self.blurb_btn.config(text='Hide Expert Opinion')
-        except Exception as e:
-            # Cosmetic feature: never crash the UI
-            # print("Blurb draw failed:", e)
+        except Exception:
             return
 
     def hide_blurb(self):
-        if self.blurb_canvas is not None:
+        if self._blurb_popup is not None:
             try:
-                self.image_canvas.delete(self._blurb_window)
+                self._blurb_popup.destroy()
             except Exception:
                 pass
+            self._blurb_popup = None
+        if self.blurb_canvas is not None:
             try:
                 self.blurb_canvas.destroy()
             except Exception:
                 pass
             self.blurb_canvas = None
-            self._blurb_window = None
+        self._blurb_img_ref = None
         self.blurb_visible = False
         self.blurb_btn.config(text='Show Expert Opinion')
 
