@@ -1663,50 +1663,140 @@ def _catkey(c: str) -> str:
     return m.get((c or "").lower(), (c or "other").lower())
 
 
+# Build a dynamic "do-not-repeat" list from item details so the blurb doesn't parrot enrichment fields.
+def _collect_banned_phrases(details: dict, category: str) -> list[str]:
+    if not isinstance(details, dict):
+        return []
+    d = {k.lower(): (v or "").strip() for k, v in details.items() if isinstance(v, str)}
+    ban = set()
+
+    # High-redundancy fields most likely to be repeated robotically
+    for k in (
+        "description","fact","scientific_name","mohs_hardness","material","composition",
+        "luster","typical_colors","color","cleavage_fracture","habit_or_form",
+        "geological_period","estimated_age","preservation_mode","size","dimensions"
+    ):
+        v = d.get(k, "")
+        if v:
+            ban.add(v)
+
+    # Common numeric/tech fragments that make blurbs feel like checklists
+    tech_bits = [
+        "mohs", "hardness", "luster", "vitreous", "adamantine", "pearly",
+        "aragonite", "calcite", "calcium carbonate", "silicon dioxide", "sio2",
+        "cleavage", "fracture", "chemical formula", "composition", "matrix"
+    ]
+    for t in tech_bits:
+        ban.add(t)
+
+    # Numbers/units (years, cm, g, etc.) tend to read as catalog copy
+    for m in re.findall(r"\b\d+(\.\d+)?\b(?:\s?(?:cm|mm|in|yrs?|years?|ma|million))?", " ".join(d.values()), re.I):
+        ban.add(m if isinstance(m, str) else "")
+
+    # Category-specific clichés
+    cat = (category or "").lower()
+    if cat == "mineral":
+        ban.update({"mohs", "hardness", "habit", "cleavage", "streak"})
+    elif cat == "fossil":
+        ban.update({"cretaceous", "eocene", "coiled shell structure"})
+    elif cat == "shell":
+        ban.update({"calcium carbonate", "aragonite"})
+    elif cat == "zoological":
+        ban.update({"keratin", "hydroxyapatite"})
+
+    # Keep it compact for the prompt
+    return [s for s in list(ban) if s][:20]
+
+# Pick a single narrative angle so the line feels like a human observation, not a datasheet.
+def _pick_commentary_angle(category: str, details: dict) -> str:
+    c = (category or "").lower()
+    d = details or {}
+    prov = (d.get("provenance") or d.get("origin") or "").strip()
+    if prov:
+        return f"Give a subtle curatorial note that situates the piece in its place of origin or find context ({prov})."
+    if c in ("fossil","zoological") and (d.get("preservation_mode") or d.get("condition")):
+        return "Comment briefly on preservation/condition and what that implies for study or display (no jargon)."
+    if c == "vinyl" and (d.get("release_year") or d.get("genres") or d.get("styles")):
+        return "Situate the record in its era/scene with one concrete sonic or scene detail (no track-by-track)."
+    if c == "mineral" and (d.get("habit_or_form") or d.get("cleavage_fracture")):
+        return "Point to one visually checkable trait a casual observer can notice (e.g., growth zoning, twinning)."
+    if c == "shell" and (d.get("subcategory") or d.get("scientific_name")):
+        return "Note a small, visible trait (ribbing, aperture shape, spiral) that separates it from lookalikes."
+    return "Offer one specific, viewer-facing observation that adds meaning beyond basic facts."
+
+# Light post-edit to remove robotic scaffolding and banned fragments that slipped through.
+_SCAFFOLD_RE = re.compile(r"(?i)\b(is|are|it is|this (?:item|specimen|fossil|shell|record)) (?:known for|characterized by|features|has)\b")
+def _humanize_blurb(text: str, banned: list[str]) -> str:
+    s = (text or "").strip()
+    if not s:
+        return s
+    s = _SCAFFOLD_RE.sub("shows", s)
+    # Nix any banned fragments verbatim
+    for b in banned:
+        if b and b in s:
+            s = s.replace(b, "")
+    # Clean doubled spaces / dangling punctuation
+    s = re.sub(r"\s{2,}", " ", s)
+    s = re.sub(r"\s+([,.;:])", r"\1", s)
+    # Keep it to one–two sentences, 28–55 words ideally
+    parts = re.split(r"(?<=[.!?])\s+", s)
+    s = " ".join(parts[:2]).strip()
+    return s
+
+
 def generate_expert_blurb(category: str, item_name: str, details: dict | None = None, photo_path: str | None = None) -> str:
-    """
-    Item-aware blurb: tries OpenAI (with image context if available), else falls back
-    to deterministic per-item heuristics.
-    """
-    # Try cached field in details first
+    # Cache hit?
     if isinstance(details, dict):
         cached = (details.get("expert_blurb") or "").strip()
         if cached:
             return cached
 
-    # Build prompt
     persona = _persona_for_category(_catkey(category))
     context = _item_context_for_blurb(category, item_name, details or {})
-    sys = (
-        f"You are the {persona}. Write ONE or TWO sentences as a tight expert opinion blurb "
-        f"for the specific item below. Be concrete and item-specific by using the provided facts; "
-        f"avoid generic definitions. Tone must match the persona (no markdown, no title, 28–55 words)."
-    )
-    user = f"ITEM FACTS:\n{context}\n\nReturn only the blurb text."
+    banned = _collect_banned_phrases(details or {}, category)
+    angle  = _pick_commentary_angle(category, details or {})
 
-    # Try vision + details via the existing OpenAI client
+    sys = (
+        f"You are the {persona}. Write ONE or TWO sentences as a tight, human-sounding expert opinion for the specific item.\n"
+        f"Style rules:\n"
+        f"- Add meaning beyond catalog facts; write like a curator speaking to a visitor.\n"
+        f"- Prefer small, concrete observations a person could notice; avoid generic definitions.\n"
+        f"- No lists, no bullet points, no numbers unless essential; avoid Mohs, formulas, checklists.\n"
+        f"- Do not repeat phrases or values from the item's enrichment fields.\n"
+        f"- Length target: 28–55 words; no markdown."
+    )
+    user = (
+        f"ITEM FACTS (for context, not to copy verbatim):\n{context}\n\n"
+        f"ANGLE: {angle}\n"
+        f"AVOID repeating these words/phrases verbatim: {', '.join(banned)}\n\n"
+        f"Return only the blurb."
+    )
+
+    # Try vision + details via OpenAI (with slightly higher creativity)
     try:
         client = _openai_client()
         content = [{"type": "input_text", "text": user}]
         img = _first_photo_for_item(details or {}, photo_path or "")
         if img and os.path.exists(img):
             content.append({"type": "input_image", "image_url": _img_to_data_url(img)})
+
         resp = client.responses.create(
             model="gpt-4o-mini",
             input=[{"role": "system", "content": [{"type":"input_text","text":sys}]},
                    {"role": "user",   "content": content}],
-            temperature=0.35,
-            max_output_tokens=120
+            temperature=0.6,
+            max_output_tokens=140
         )
-        text = (_safe_first_text(resp) or "").strip()
-        # sanity trim and guardrails
-        if 20 <= len(text) <= 320 and "\n" not in text:
-            return text
+        raw = (_safe_first_text(resp) or "").strip()
+        if raw:
+            out = _humanize_blurb(raw, banned)
+            if 20 <= len(out) <= 320:
+                return out
     except Exception:
         pass
 
-    # Deterministic safe fallback (still item-aware)
-    return _fallback_blurb(category, item_name)
+    # Deterministic, item-aware fallback if API fails
+    return _humanize_blurb(_fallback_blurb(category, item_name), banned)
 
 
 def save_blurb_to_db(item_id: int, text: str):
