@@ -2,10 +2,25 @@
 # artiFACTSv10.5a.py — pass-in-root pattern, tailored schemas only, scrollable details
 
 import re  # <— if not already present
-# import openai_classifier_v1 as vc  # Commented out - module not available
-# Stub function for when the classifier module is not available
-def vc_classify_image_stub(image_path, category):
-    return {'openai': {'guesses': []}}
+# Image classifier (uses your existing module when present)
+try:
+    import openai_classifier_v1 as vc  # provides vc.classify_image(path, category)
+except Exception:
+    vc = None  # allow app to run without the module
+
+def run_classifier(image_path: str, category: str) -> dict:
+    """
+    Return {'openai': {'guesses': [...]}}; guaranteed structure.
+    Uses vc.classify_image if available, else a safe empty fallback.
+    """
+    # real classifier
+    if vc and hasattr(vc, "classify_image"):
+        try:
+            return vc.classify_image(image_path, category)
+        except Exception:
+            pass
+    # fallback (no crash, but also no guesses)
+    return {"openai": {"guesses": []}}
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -3932,7 +3947,7 @@ class ClassifierApp:
         if cat == "zoological" and self._species_mode:
             return
         cat = cat or 'other'
-        result = vc_classify_image_stub(image_path, cat)
+        result = run_classifier(image_path, cat)
         openai_block = result.get(
             'openai', {}) if isinstance(result, dict) else {}
         oa_guesses = (openai_block.get('guesses') or [])[:3]
