@@ -2651,6 +2651,11 @@ class LibraryWindow(tk.Toplevel):
             )
             bubble.tag_bind(close_id, '<Button-1>', lambda e: self.toggle_blurb())
 
+            popup.update_idletasks()
+            px = self.winfo_rootx() + (self.winfo_width() - popup.winfo_width()) // 2
+            py = self.winfo_rooty() + (self.winfo_height() - popup.winfo_height()) // 2
+            popup.geometry(f"+{px}+{py}")
+
             self.blurb_canvas = bubble
             self._blurb_popup = popup
             self.blurb_btn.config(text='Hide Expert Opinion')
