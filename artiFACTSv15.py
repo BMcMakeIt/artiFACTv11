@@ -3574,7 +3574,9 @@ class ClassifierApp:
         self.category_combo.bind("<<ComboboxSelected>>", self._on_category_change)
         self.last_classification = None
         self._species_mode = False
+        self._img_search_epoch = 0
         self._ref_job = None
+        self._last_image_path = ""
         SlateButton(tl, text='Select Image', command=self.select_image).grid(
             row=1, column=2, padx=6)
         SlateButton(tl, text='Capture Image', command=self.capture_image).grid(
@@ -3635,10 +3637,7 @@ class ClassifierApp:
             self.ref_widgets.append(ph)
 
         self._rb_widgets = []
-        self._last_image_path = ""
         self._chosen_label = ""
-        # Track image-search state
-        self._img_search_epoch = 0
         self._last_element = {"element":"", "confidence":0.0}
 
     def _on_category_change(self, event=None):
@@ -3717,34 +3716,97 @@ class ClassifierApp:
         self._safe_load_refs(clean)
 
     def load_reference_images(self, term: str):
+        """Fetch and display DuckDuckGo reference images for the current category/term.
+
+        - Runs in a worker thread, marshals UI updates back to the main thread.
+        - Uses an epoch guard so older requests can't clobber newer results.
+        - Tries a few sensible query variants before giving up.
+        """
+        # cancel any pending scheduled call
         self._ref_job = None
+
         cat = (self.category_var.get() or "").lower().strip()
-        search_term = term
+        base = (term or "").strip()
+
+        # If no explicit term passed, fall back to any selected/derived label
+        try:
+            if not base:
+                base = (getattr(self, "_chosen_label", "") or "").strip()
+        except Exception:
+            pass
+        if not base:
+            self._clear_reference_images("No query available.")
+            return
+
+        # Zoological: if the label is generic (e.g., "insect specimen"), try to promote to species via enrichment
         if cat == "zoological":
-            norm = normalize_zoo_label(term)
-            generic_terms = {
-                "zoological specimen", "insect specimen", "butterfly specimen",
-                "beetle specimen", "moth specimen", "insect", "butterfly",
-                "beetle", "moth"
-            }
-            if not norm or "specimen" in norm or norm in generic_terms:
-                try:
-                    meta = enrich_zoological_two_pass(norm or "zoological specimen",
-                                                     norm, self.photo_path)
-                    species = meta.get("scientific_name") or meta.get("organism")
-                    if species:
-                        search_term = species
-                except Exception:
-                    pass
-        query = _build_reference_query(cat, search_term)
+            try:
+                norm = normalize_zoo_label(base)
+                generic = {
+                    "zoological specimen", "insect specimen", "butterfly specimen",
+                    "beetle specimen", "moth specimen", "insect", "butterfly",
+                    "beetle", "moth"
+                }
+                search_base = norm or base
+                if (not norm) or ("specimen" in norm) or (norm in generic):
+                    photo = getattr(self, "_last_image_path", "") or ""
+                    meta = enrich_zoological_two_pass(search_base, search_base, photo, 0.7)
+                    sp = (meta.get("scientific_name") or "").strip()
+                    if sp:
+                        base = sp
+            except Exception:
+                # Keep original base if anything fails
+                pass
+
+        # Primary + fallbacks
+        def _build_qs(b):
+            try:
+                return _build_reference_query(cat, b)
+            except Exception:
+                return b
+
+        queries = [
+            _build_qs(base),
+            _build_qs(f"{base} specimen"),
+            _build_qs(f"{base} macro"),
+            _build_qs(f"{base} museum"),
+        ]
+        if cat == "vinyl":
+            queries += [f"{base} album cover", base]
+
+        # De-dupe while preserving order
+        seen = set()
+        queries = [q for q in queries if not (q in seen or seen.add(q))]
+
+        # Show spinner text, bump epoch
         self._clear_reference_images("Searching…")
         self._img_search_epoch += 1
         epoch = self._img_search_epoch
 
         def _work():
-            results = ddg_image_search(query, max_results=4)
-            self.master.after(
-                0, lambda: self._image_search_complete(epoch, search_term, results))
+            results = []
+            try:
+                for q in queries:
+                    results = ddg_image_search(q, max_results=8) or []
+                    if results:
+                        break
+                if not results:
+                    # Very defensive: try the raw base once
+                    results = ddg_image_search(base, max_results=8) or []
+            except Exception:
+                results = []
+
+            def _apply():
+                # Stale work? Bail out.
+                if epoch != self._img_search_epoch:
+                    return
+                if results:
+                    self._set_reference_images(results)
+                    self.ref_note.config(text="DuckDuckGo previews")
+                else:
+                    self._clear_reference_images("No images found.")
+            # Back to UI thread
+            self.master.after(0, _apply)
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -3760,10 +3822,11 @@ class ClassifierApp:
     def view_library(self): LibraryWindow(self.master)
 
     def select_image(self):
-        p = filedialog.askopenfilename(
+        path = filedialog.askopenfilename(
             filetypes=[('Image files', '*.jpg *.jpeg *.png')])
-        if p:
-            self.process_image(p)
+        if path:
+            self._last_image_path = path
+            self.process_image(path)
 
     def capture_image(self):
         cap = cv2.VideoCapture(0)
@@ -3829,6 +3892,7 @@ class ClassifierApp:
             if not cv2.imwrite(tmp, frame):
                 messagebox.showerror('Error', 'Could not write temp image.')
                 return
+            self._last_image_path = tmp
             img = Image.fromarray(cv2.cvtColor(
                 frame, cv2.COLOR_BGR2RGB)).resize((300, 300))
             tk_img = ImageTk.PhotoImage(img)
