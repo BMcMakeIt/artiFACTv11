@@ -3589,6 +3589,7 @@ class ClassifierApp:
         self.category_combo.bind("<<ComboboxSelected>>", self._on_category_change)
         self.last_classification = None
         self._species_mode = False
+        self._busy_count = 0
         self._img_search_epoch = 0
         self._ref_job = None
         self._last_image_path = ""
@@ -3737,6 +3738,7 @@ class ClassifierApp:
         - Uses an epoch guard so older requests can't clobber newer results.
         - Tries a few sensible query variants before giving up.
         """
+        self._busy_push()
         # cancel any pending scheduled call
         self._ref_job = None
 
@@ -3811,17 +3813,8 @@ class ClassifierApp:
             except Exception:
                 results = []
 
-            def _apply():
-                # Stale work? Bail out.
-                if epoch != self._img_search_epoch:
-                    return
-                if results:
-                    self._set_reference_images(results)
-                    self.ref_note.config(text="DuckDuckGo previews")
-                else:
-                    self._clear_reference_images("No images found.")
             # Back to UI thread
-            self.master.after(0, _apply)
+            self.master.after(0, lambda: self._image_search_complete(epoch, base, results))
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -3833,6 +3826,60 @@ class ClassifierApp:
             self._set_reference_images(results)
         else:
             self._clear_reference_images("No images found.")
+        self._busy_pop()
+        self._busy_pop()
+
+    # --- Busy / reset helpers -------------------------------------------------
+    def _busy_push(self):
+        self._busy_count = getattr(self, "_busy_count", 0) + 1
+        try: self.master.config(cursor="watch")
+        except Exception: pass
+
+    def _busy_pop(self):
+        self._busy_count = max(0, getattr(self, "_busy_count", 1) - 1)
+        if self._busy_count == 0:
+            try: self.master.config(cursor="")
+            except Exception: pass
+
+    def _cancel_ref_work(self):
+        """Cancel any scheduled or in-flight reference image lookups."""
+        # Cancel any pending .after() call
+        try:
+            if getattr(self, "_ref_job", None):
+                self.master.after_cancel(self._ref_job)
+                self._ref_job = None
+        except Exception:
+            pass
+        # Invalidate worker threads by bumping the epoch
+        self._img_search_epoch = getattr(self, "_img_search_epoch", 0) + 1
+
+    def _clear_classification(self, msg: str = ""):
+        """Wipe the guesses UI and optionally show a placeholder message."""
+        # Text panel
+        try:
+            self.result_text.config(state='normal')
+            self.result_text.delete(1.0, tk.END)
+            if msg:
+                self.result_text.insert(tk.END, f"{msg}\n")
+            self.result_text.config(state='disabled')
+        except Exception:
+            pass
+        # Radio buttons
+        for w in getattr(self, "_rb_widgets", []):
+            try: w.destroy()
+            except Exception: pass
+        self._rb_widgets = []
+        self._chosen_label = ""
+
+    def _reset_for_new_image(self):
+        """Call this whenever a *new* image path/frame is set."""
+        self._cancel_ref_work()
+        # Clear right away so the user sees things change
+        try:
+            self._clear_reference_images("—")
+        except Exception:
+            pass
+        self._clear_classification("Classifying…")
 
     def view_library(self): LibraryWindow(self.master)
 
@@ -3840,6 +3887,8 @@ class ClassifierApp:
         path = filedialog.askopenfilename(
             filetypes=[('Image files', '*.jpg *.jpeg *.png')])
         if path:
+            self._reset_for_new_image()
+            self._busy_push()
             self._last_image_path = path
             self.process_image(path)
 
@@ -3864,6 +3913,8 @@ class ClassifierApp:
         cap.release()
         cv2.destroyAllWindows()
         if frame is not None:
+            self._reset_for_new_image()
+            self._busy_push()
             self.process_frame(frame)
 
     def process_image(self, path):
@@ -3877,6 +3928,7 @@ class ClassifierApp:
             cat = (self.category_var.get() or "").lower().strip()
             if cat == "zoological":
                 self._species_mode = True
+                self._busy_push()
                 self.result_text.delete(1.0, tk.END)
                 self.result_text.insert(tk.END, "Finding species candidates…\n")
                 self.master.update_idletasks()
@@ -3894,6 +3946,7 @@ class ClassifierApp:
                     except Exception:
                         cands = []
                     self.master.after(0, lambda: self._show_species_candidates(cands))
+                    self.master.after(0, self._busy_pop)
                 threading.Thread(target=_bg_species, daemon=True).start()
                 return
             self._species_mode = False
@@ -3918,6 +3971,7 @@ class ClassifierApp:
             cat = (self.category_var.get() or "").lower().strip()
             if cat == "zoological":
                 self._species_mode = True
+                self._busy_push()
                 self.result_text.delete(1.0, tk.END)
                 self.result_text.insert(tk.END, "Finding species candidates…\n")
                 self.master.update_idletasks()
@@ -3935,6 +3989,7 @@ class ClassifierApp:
                     except Exception:
                         cands = []
                     self.master.after(0, lambda: self._show_species_candidates(cands))
+                    self.master.after(0, self._busy_pop)
                 threading.Thread(target=_bg_species, daemon=True).start()
                 return
             self._species_mode = False
@@ -3946,6 +4001,12 @@ class ClassifierApp:
         cat = (self.category_var.get() or "").strip().lower()
         if cat == "zoological" and self._species_mode:
             return
+        # Make sure UI is in a "busy" state while we classify
+        self._busy_push()
+        # If something loaded us directly (e.g., library), ensure panes are clean
+        if not getattr(self, "_rb_widgets", []):
+            # Avoid flicker when radio buttons already exist
+            self._clear_classification("Classifying…")
         cat = cat or 'other'
         result = run_classifier(image_path, cat)
         openai_block = result.get(
@@ -3991,6 +4052,7 @@ class ClassifierApp:
 
         self._last_image_path = image_path
         self._refresh_guess_radios(oa_guesses)
+        self._busy_pop()
 
     def _refresh_guess_radios(self, guesses):
         for w in getattr(self, "_rb_widgets", []):
