@@ -1663,6 +1663,31 @@ def _catkey(c: str) -> str:
     return m.get((c or "").lower(), (c or "other").lower())
 
 
+# --- Style profiles (choose one in BLURB_STYLE_PROFILE) ---
+BLURB_STYLE_PROFILE = 'house'   # 'house' | 'attenborough_hint' | 'sagan_hint' | 'rollingstone_70s'
+STYLE_HINTS = {
+    'house': "",
+    'attenborough_hint': "Write with the calm, observational cadence of a natural history narrator; respectful, precise, no theatrics.",
+    'sagan_hint': "Carry a brief note of wonder—no more than six words—woven into plainspoken clarity.",
+    'rollingstone_70s': "Lean into album-era criticism: texture, scene, and moment—no star-ratings language."
+}
+
+
+def _category_rules(category: str) -> str:
+    c = (category or "").lower()
+    if c == "mineral":
+        return ("Never mention Mohs hardness, cleavage, fracture, chemical formulas, or the phrase 'variety of chalcedony'. "
+                "Offer one visible, checkable trait or a locality/provenance angle that helps a visitor see the piece differently.")
+    if c == "zoological":
+        return ("Do not mention physical size, dimensions, inches, centimeters, weight, or 'specimen size'. "
+                "Prefer preservation notes, diagnostic morphology, or behavior/ecology context in plain language.")
+    if c == "fossil":
+        return ("Avoid geological period name-drops unless in the item name; prefer one note on preservation/taphonomy or collection context.")
+    if c == "shell":
+        return ("Avoid chemical composition; prefer aperture, spire, ribs, pattern, or wear—things a visitor can actually notice.")
+    return "Avoid repeating catalog fields; add one concrete observation."
+
+
 # Build a dynamic "do-not-repeat" list from item details so the blurb doesn't parrot enrichment fields.
 def _collect_banned_phrases(details: dict, category: str) -> list[str]:
     if not isinstance(details, dict):
@@ -1670,42 +1695,36 @@ def _collect_banned_phrases(details: dict, category: str) -> list[str]:
     d = {k.lower(): (v or "").strip() for k, v in details.items() if isinstance(v, str)}
     ban = set()
 
-    # High-redundancy fields most likely to be repeated robotically
+    # High-redundancy fields likely to be parroted
     for k in (
         "description","fact","scientific_name","mohs_hardness","material","composition",
         "luster","typical_colors","color","cleavage_fracture","habit_or_form",
-        "geological_period","estimated_age","preservation_mode","size","dimensions"
+        "geological_period","estimated_age","preservation_mode","size","dimensions","weight","length","width","height"
     ):
         v = d.get(k, "")
         if v:
             ban.add(v)
 
-    # Common numeric/tech fragments that make blurbs feel like checklists
+    # Technical clichés / fragments
     tech_bits = [
-        "mohs", "hardness", "luster", "vitreous", "adamantine", "pearly",
-        "aragonite", "calcite", "calcium carbonate", "silicon dioxide", "sio2",
-        "cleavage", "fracture", "chemical formula", "composition", "matrix"
+        "mohs", "hardness", "luster", "streak", "cleavage", "fracture",
+        "chemical formula", "composition", "matrix", "variety of chalcedony",
+        "calcite", "aragonite", "calcium carbonate", "silicon dioxide", "sio2",
+        "specimen size", "inches", "inch", "cm", "centimeter", "mm", "millimeter"
     ]
-    for t in tech_bits:
-        ban.add(t)
+    ban.update(tech_bits)
 
-    # Numbers/units (years, cm, g, etc.) tend to read as catalog copy
-    for m in re.findall(r"\b\d+(\.\d+)?\b(?:\s?(?:cm|mm|in|yrs?|years?|ma|million))?", " ".join(d.values()), re.I):
-        ban.add(m if isinstance(m, str) else "")
+    # Numbers/units from details blob
+    for token in re.findall(r"\b\d+(?:\.\d+)?\s?(?:cm|mm|in|inch|inches|g|kg|yrs?|years?|ma|million)?", " ".join(d.values()), re.I):
+        ban.add(token.lower())
 
-    # Category-specific clichés
+    # Category-specific add-ons
     cat = (category or "").lower()
     if cat == "mineral":
-        ban.update({"mohs", "hardness", "habit", "cleavage", "streak"})
-    elif cat == "fossil":
-        ban.update({"cretaceous", "eocene", "coiled shell structure"})
-    elif cat == "shell":
-        ban.update({"calcium carbonate", "aragonite"})
+        ban.update({"conchoidal fracture", "variety of chalcedony"})
     elif cat == "zoological":
-        ban.update({"keratin", "hydroxyapatite"})
-
-    # Keep it compact for the prompt
-    return [s for s in list(ban) if s][:20]
+        ban.update({"length", "width", "height", "tall", "long", "weighs", "weight"})
+    return [s for s in list(ban) if s][:28]
 
 # Pick a single narrative angle so the line feels like a human observation, not a datasheet.
 def _pick_commentary_angle(category: str, details: dict) -> str:
@@ -1725,23 +1744,25 @@ def _pick_commentary_angle(category: str, details: dict) -> str:
     return "Offer one specific, viewer-facing observation that adds meaning beyond basic facts."
 
 # Light post-edit to remove robotic scaffolding and banned fragments that slipped through.
-_SCAFFOLD_RE = re.compile(r"(?i)\b(is|are|it is|this (?:item|specimen|fossil|shell|record)) (?:known for|characterized by|features|has)\b")
+_SCAFFOLD_RE = re.compile(r"(?i)\b(?:is|are|it is|this (?:item|specimen|fossil|shell|record)) (?:known for|characterized by|features|has)\b")
 def _humanize_blurb(text: str, banned: list[str]) -> str:
     s = (text or "").strip()
     if not s:
         return s
+    # prune boilerplate
     s = _SCAFFOLD_RE.sub("shows", s)
-    # Nix any banned fragments verbatim
+    s = re.sub(r"(?i)\b,?\s*a (?:variety|type) of [^,.;]+,?\s*", " ", s)  # “a variety of chalcedony…"
+    s = re.sub(r"(?i)\b(?:it is|it’s|it is made of|is composed of)\b", "is", s)
+    # remove banned fragments
     for b in banned:
-        if b and b in s:
-            s = s.replace(b, "")
-    # Clean doubled spaces / dangling punctuation
+        if b and b.lower() in s.lower():
+            s = re.sub(re.escape(b), "", s, flags=re.I)
+    # clean spacing/punct
     s = re.sub(r"\s{2,}", " ", s)
-    s = re.sub(r"\s+([,.;:])", r"\1", s)
-    # Keep it to one–two sentences, 28–55 words ideally
+    s = re.sub(r"\s+([,.;:])", r"\1", s).strip()
+    # keep to 1–2 sentences
     parts = re.split(r"(?<=[.!?])\s+", s)
-    s = " ".join(parts[:2]).strip()
-    return s
+    return " ".join(parts[:2]).strip()
 
 
 def generate_expert_blurb(category: str, item_name: str, details: dict | None = None, photo_path: str | None = None) -> str:
@@ -1753,17 +1774,17 @@ def generate_expert_blurb(category: str, item_name: str, details: dict | None = 
 
     persona = _persona_for_category(_catkey(category))
     context = _item_context_for_blurb(category, item_name, details or {})
-    banned = _collect_banned_phrases(details or {}, category)
-    angle  = _pick_commentary_angle(category, details or {})
+    banned  = _collect_banned_phrases(details or {}, category)
+    angle   = _pick_commentary_angle(category, details or {})
+    style_hint = STYLE_HINTS.get(BLURB_STYLE_PROFILE, "")
 
     sys = (
         f"You are the {persona}. Write ONE or TWO sentences as a tight, human-sounding expert opinion for the specific item.\n"
-        f"Style rules:\n"
-        f"- Add meaning beyond catalog facts; write like a curator speaking to a visitor.\n"
-        f"- Prefer small, concrete observations a person could notice; avoid generic definitions.\n"
-        f"- No lists, no bullet points, no numbers unless essential; avoid Mohs, formulas, checklists.\n"
-        f"- Do not repeat phrases or values from the item's enrichment fields.\n"
-        f"- Length target: 28–55 words; no markdown."
+        f"{style_hint}\n"
+        f"Rules: {_category_rules(category)} "
+        f"Write like a curator speaking to a visitor; add meaning beyond catalog facts. "
+        f"No lists, no numbers unless essential; avoid formulas, Mohs, and checklist jargon. "
+        f"Length: 28–55 words. No markdown."
     )
     user = (
         f"ITEM FACTS (for context, not to copy verbatim):\n{context}\n\n"
