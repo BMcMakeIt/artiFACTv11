@@ -3966,7 +3966,7 @@ class ClassifierApp:
 
         self._safe_load_refs(clean)
 
-    def load_reference_images(self, term: str):
+    def load_reference_images(self, term: str | None = None):
         """Fetch and display DuckDuckGo reference images for the current category/term.
 
         - Runs in a worker thread, marshals UI updates back to the main thread.
@@ -3988,6 +3988,7 @@ class ClassifierApp:
             pass
         if not base:
             self._clear_reference_images("No query available.")
+            self._busy_pop()
             return
 
         # Zoological: if the label is generic (e.g., "insect specimen"), try to promote to species via enrichment
