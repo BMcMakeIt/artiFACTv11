@@ -2848,22 +2848,38 @@ class SearchRateLimited(SearchError):
 
 def _build_reference_query(category: str, term: str) -> str:
     c = (category or "").lower().strip()
-    term = _decontainerize_label(term)
-    t = term.strip()
+    t = _decontainerize_label(term or "").strip()
+    # tokens we may add
+    need = []
+
+    def want(word: str) -> None:
+        if word and word.lower() not in t.lower():
+            need.append(word)
+
     if c == "vinyl":
-        return f"{t} album cover front high resolution"
-    if c == "coin":
-        return f"{t} coin obverse reverse"
-    if c == "fossil":
-        return f"{t} fossil specimen"
-    if c == "shell":
-        return f"{t} seashell specimen"
-    if c == "mineral":
-        return f"{t} mineral specimen"
-    if c == "zoological":
-        # Push toward taxonomy-forward images
-        return f"{t} specimen dorsal"
-    return t
+        want("album cover")
+        want("front")
+        want("high resolution")
+    elif c == "coin":
+        want("coin")
+        want("obverse")
+        want("reverse")
+    elif c == "fossil":
+        want("fossil")
+        want("specimen")
+    elif c == "shell":
+        # accept "shell" OR "seashell" already present
+        if not re.search(r"\b(sea)?shell(s)?\b", t, flags=re.I):
+            need.append("seashell")
+        want("specimen")
+    elif c == "mineral":
+        want("mineral")
+        want("specimen")
+    elif c == "zoological":
+        want("specimen")
+        want("dorsal")
+
+    return " ".join([t] + need) if need else t
 
 
 # --- DDG session + throttled image search ---
