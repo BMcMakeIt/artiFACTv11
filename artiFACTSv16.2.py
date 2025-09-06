@@ -2838,6 +2838,14 @@ except Exception:
     _DDG_OK = False
 
 
+class SearchError(Exception):
+    """Base class for image search failures."""
+
+
+class SearchRateLimited(SearchError):
+    """Raised when the provider rate limits requests."""
+    
+
 def _build_reference_query(category: str, term: str) -> str:
     c = (category or "").lower().strip()
     term = _decontainerize_label(term)
@@ -2863,10 +2871,14 @@ def _build_reference_query(category: str, term: str) -> str:
 _DDG_LOCK = threading.Lock()
 _DDG_SESSION = None
 _DDG_CACHE = {}
-_DDG_CACHE_TTL = 600.0      # 10 minutes
+_DDG_CACHE_TTL = 1800.0     # 30 minutes
 _last_ddg_t = 0.0
-_MIN_INTERVAL = 2.5         # seconds between calls (global)
-_MAX_TRIES = 2              # exponential backoff retries on 403
+_MIN_INTERVAL = 4.0         # seconds between calls (global)
+_MAX_TRIES = 5              # exponential backoff retries on 403
+_ddg_rl_count = 0
+_RL_THRESHOLD = 3
+_ddg_pause_until = 0.0
+_RL_PAUSE = 90.0            # pause duration on repeated rate limits
 
 
 def _ddg_session():
@@ -2877,29 +2889,34 @@ def _ddg_session():
 
 
 def ddg_image_search(term: str, max_results: int = 8):
-    global _last_ddg_t
+    global _last_ddg_t, _ddg_rl_count, _ddg_pause_until
     if not _DDG_OK:
         return []
     term = (term or "").strip()
     if not term:
         return []
 
-    key = (term, int(max_results))
     now = time.monotonic()
+    if now < _ddg_pause_until:
+        raise SearchRateLimited("paused")
+
+    key = (term, int(max_results))
     ts_res = _DDG_CACHE.get(key)
     if ts_res and (now - ts_res[0] < _DDG_CACHE_TTL):
         return ts_res[1]
 
+    last_err = None
+
     with _DDG_LOCK:  # serialize all DDG calls across the app
-        # global spacing
         wait = max(0.0, _MIN_INTERVAL - (time.monotonic() - _last_ddg_t))
         if wait:
+            print(f"[ddg] q={term!r} wait={wait:.2f}s")
             time.sleep(wait)
 
         tries = 0
         while tries < _MAX_TRIES:
             try:
-                # named args for the new API; region keeps results consistent
+                print(f"[ddg] q={term!r} try={tries+1}")
                 sess = _ddg_session()
                 results = list(sess.images(
                     keywords=term,
@@ -2910,17 +2927,36 @@ def ddg_image_search(term: str, max_results: int = 8):
                 _last_ddg_t = time.monotonic()
                 out = [(r.get("image"), r.get("url"))
                        for r in results if r.get("image") and r.get("url")]
+                print(f"[ddg] q={term!r} try={tries+1} results={len(out)}")
                 _DDG_CACHE[key] = (_last_ddg_t, out)
+                _ddg_rl_count = 0
                 return out
             except Exception as e:
-                # duckduckgo rate limit → exponential backoff with jitter
                 tries += 1
-                backoff = (1.6 ** tries) + random.random()
-                # optional: print(f"[DDG] {term!r} try {tries} backoff {backoff:.2f}s: {e}")
+                last_err = e
+                msg = str(e).lower()
+                is_rl = "403" in msg or "rate" in msg
+                if is_rl:
+                    _ddg_rl_count += 1
+                    marker = "rate-limit"
+                else:
+                    _ddg_rl_count = 0
+                    marker = "error"
+                backoff = (2 ** tries) + random.random()
+                print(f"[ddg] q={term!r} try={tries} {marker} sleep={backoff:.2f}s")
                 time.sleep(backoff)
+                if _ddg_rl_count >= _RL_THRESHOLD:
+                    _ddg_pause_until = time.monotonic() + _RL_PAUSE
+                    print(f"[ddg] circuit break {_RL_PAUSE}s")
+                    break
 
-        # last resort: cached (stale) or empty
-        return _DDG_CACHE.get(key, (0, []))[1]
+    # attempt stale cache on failure
+    if key in _DDG_CACHE:
+        return _DDG_CACHE[key][1]
+
+    if isinstance(last_err, Exception) and ("403" in str(last_err).lower() or _ddg_rl_count > 0):
+        raise SearchRateLimited(str(last_err))
+    raise SearchError(str(last_err))
 
 
 def _download_image(url: str, dest_path: str, referer: str | None = None) -> bool:
@@ -3922,10 +3958,31 @@ class ClassifierApp:
         self._img_search_epoch += 1
         epoch = self._img_search_epoch
 
-    def _image_search_complete(self, epoch: int, term: str, results):
+        def _run(qs, ep, base_term):
+            self._busy_push()
+            err = None
+            results = []
+            chosen = base_term
+            for q in qs:
+                chosen = q
+                try:
+                    results = ddg_image_search(q, max_results=8)
+                    if results:
+                        break
+                except (SearchRateLimited, SearchError) as e:
+                    err = e
+                    break
+            self.master.after(0, lambda: self._image_search_complete(ep, chosen, results, err))
+
+        threading.Thread(target=_run, args=(queries, epoch, base), daemon=True).start()
+
+    def _image_search_complete(self, epoch: int, term: str, results, err=None):
         if epoch != self._img_search_epoch:
             return
-        if results:
+        if err:
+            self.ref_note.config(text="Rate-limited; retrying shortly")
+            self.master.after(6000, lambda t=term: self.load_reference_images(t))
+        elif results:
             self.ref_note.config(text=f"Results for: {term}")
             self._set_reference_images(results)
         else:
