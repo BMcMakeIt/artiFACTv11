@@ -2887,12 +2887,12 @@ def _build_reference_query(category: str, term: str) -> str:
 _DDG_LOCK = threading.Lock()
 _DDG_SESSION = None
 _DDG_CACHE = {}
-_DDG_CACHE_TTL = 1800.0     # 30 minutes
+_DDG_CACHE_TTL = 600.0
 _last_ddg_t = 0.0
-_MIN_INTERVAL = 4.0         # seconds between calls (global)
-_MAX_TRIES = 5              # exponential backoff retries on 403
+_MIN_INTERVAL = 2.5
+_MAX_TRIES = 4
 _ddg_rl_count = 0
-_RL_THRESHOLD = 3
+_RL_THRESHOLD = 4
 _ddg_pause_until = 0.0
 _RL_PAUSE = 90.0            # pause duration on repeated rate limits
 
@@ -2935,7 +2935,7 @@ def ddg_image_search(term: str, max_results: int = 8):
                 print(f"[ddg] q={term!r} try={tries+1}")
                 sess = _ddg_session()
                 results = list(sess.images(
-                    keywords=term,
+                    term,
                     max_results=max_results,
                     safesearch="moderate",
                     region="us-en",
