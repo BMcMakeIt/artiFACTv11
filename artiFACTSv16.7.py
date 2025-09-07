@@ -14,6 +14,8 @@ import os
 import cv2
 import sqlite3
 import time
+from datetime import datetime
+from functools import partial
 from PIL import Image, ImageTk, ImageDraw, ImageFilter
 from tkinter import filedialog, messagebox, ttk
 import re
@@ -3268,6 +3270,450 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
 
     return meta
 
+
+# ===================== Upload & Review Dialogs =====================
+
+class UploadDialog(tk.Toplevel):
+    """
+    Step 1: pick/capture images, basic details.
+    Hands off to ReviewDialog via a simple dict payload.
+    """
+    MAX_IMAGES = 4
+
+    def __init__(self, master, on_continue):
+        super().__init__(master)
+        self.title("Upload Artifact")
+        self.configure(bg=COLORS.get('bg_panel', '#111827'))
+        self.on_continue = on_continue
+        self.images = []   # list of (PIL.Image, temp_path) for later save
+        self.tempfiles = []
+        self.cap = None    # OpenCV camera handle
+
+        # --- Top: image pick / capture ---
+        frm = tk.Frame(self, bg=COLORS['bg_panel'])
+        frm.pack(fill='both', expand=True, padx=12, pady=12)
+
+        left = tk.Frame(frm, bg=COLORS['bg_panel'])
+        left.grid(row=0, column=0, sticky="nsew", padx=(0,10))
+        right = tk.Frame(frm, bg=COLORS['bg_panel'])
+        right.grid(row=0, column=1, sticky="nsew")
+
+        for i in range(2):
+            frm.grid_columnconfigure(i, weight=1)
+
+        # File picker
+        tk.Label(left, text="Upload photos (1–4)", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).pack(anchor='w')
+        tk.Button(left, text="Choose images...", command=self.pick_files).pack(anchor='w', pady=(4,10))
+        self.preview = tk.Frame(left, bg=COLORS['bg_panel'])
+        self.preview.pack(fill='x')
+
+        # Camera capture
+        tk.Label(right, text="Camera", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).pack(anchor='w')
+        self.cam_canvas = tk.Label(right, bg=COLORS['bg_panel'])
+        self.cam_canvas.pack(fill='x', pady=(4,6))
+        btns = tk.Frame(right, bg=COLORS['bg_panel'])
+        btns.pack(anchor='w')
+        tk.Button(btns, text="Start Camera", command=self.start_cam).pack(side='left')
+        tk.Button(btns, text="Snap", command=self.snap_photo).pack(side='left', padx=6)
+        tk.Button(btns, text="Stop", command=self.stop_cam).pack(side='left')
+
+        # --- Details ---
+        tk.Label(frm, text="Details", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(row=1, column=0, columnspan=2, sticky='w', pady=(12,4))
+        det = tk.Frame(frm, bg=COLORS['bg_panel'])
+        det.grid(row=2, column=0, columnspan=2, sticky='ew')
+        for i in range(2):
+            det.grid_columnconfigure(i, weight=1)
+
+        tk.Label(det, text="Category", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(row=0, column=0, sticky='w')
+        self.category_var = tk.StringVar(value="minerals")
+        cats = ["minerals","fossils","shells","coins","vinyl","zoological","other"]
+        self.category = ttk.Combobox(det, values=cats, textvariable=self.category_var, state="readonly")
+        self.category.grid(row=1, column=0, sticky='ew', pady=(0,8))
+
+        tk.Label(det, text="Title", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(row=0, column=1, sticky='w')
+        self.title_var = tk.StringVar()
+        tk.Entry(det, textvariable=self.title_var).grid(row=1, column=1, sticky='ew', pady=(0,8))
+
+        tk.Label(det, text="Notes", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(row=2, column=0, columnspan=2, sticky='w')
+        self.notes = tk.Text(det, height=4)
+        self.notes.grid(row=3, column=0, columnspan=2, sticky='ew')
+
+        # --- Actions ---
+        act = tk.Frame(self, bg=COLORS['bg_panel'])
+        act.pack(fill='x', pady=(10,6))
+        tk.Button(act, text="Cancel", command=self.destroy).pack(side='left')
+        tk.Button(act, text="Review →", command=self.go_review).pack(side='right')
+
+        self._cam_running = False
+        self._tk_cam_img = None
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        self.stop_cam()
+        self.destroy()
+
+    def pick_files(self):
+        if len(self.images) >= self.MAX_IMAGES:
+            messagebox.showinfo("Limit", "Max 4 photos.")
+            return
+        paths = filedialog.askopenfilenames(filetypes=[("Images","*.jpg *.jpeg *.png *.webp *.bmp")])
+        for p in paths:
+            if len(self.images) >= self.MAX_IMAGES: break
+            try:
+                im = Image.open(p).convert("RGB")
+                self.images.append((im, p))
+            except Exception:
+                pass
+        self.render_preview()
+
+    def render_preview(self):
+        for w in list(self.preview.children.values()):
+            w.destroy()
+        for idx, (im, src) in enumerate(self.images):
+            thumb = im.copy()
+            thumb.thumbnail((140,140))
+            tkimg = ImageTk.PhotoImage(thumb)
+            lbl = tk.Label(self.preview, image=tkimg, bg=COLORS['bg_panel'])
+            lbl.image = tkimg
+            lbl.grid(row=0, column=idx, padx=4, pady=4)
+            rm = tk.Button(self.preview, text="×", command=partial(self._remove, idx))
+            rm.grid(row=1, column=idx)
+
+    def _remove(self, idx):
+        try:
+            self.images.pop(idx)
+            self.render_preview()
+        except Exception:
+            pass
+
+    # ---- Camera ----
+    def start_cam(self):
+        try:
+            self.cap = cv2.VideoCapture(0)
+            if not self.cap or not self.cap.isOpened():
+                messagebox.showerror("Camera", "Cannot open camera.")
+                return
+            self._cam_running = True
+            self.after(10, self._cam_loop)
+        except Exception as e:
+            messagebox.showerror("Camera", f"Camera error: {e}")
+
+    def _cam_loop(self):
+        if not self._cam_running or not self.cap: return
+        ok, frame = self.cap.read()
+        if ok:
+            # shrink for preview
+            h, w = frame.shape[:2]
+            scale = 480 / max(h, w)
+            if scale < 1.0:
+                frame = cv2.resize(frame, (int(w*scale), int(h*scale)))
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
+            tkimg = ImageTk.PhotoImage(img)
+            self.cam_canvas.configure(image=tkimg)
+            self.cam_canvas.image = tkimg
+        self.after(33, self._cam_loop)
+
+    def snap_photo(self):
+        if not self.cap or not self._cam_running:
+            return
+        ok, frame = self.cap.read()
+        if not ok: return
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        im = Image.fromarray(rgb)
+        if len(self.images) < self.MAX_IMAGES:
+            self.images.append((im, "<camera>"))
+            self.render_preview()
+
+    def stop_cam(self):
+        self._cam_running = False
+        if self.cap:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+        self.cap = None
+        self.cam_canvas.configure(image="")
+
+    def go_review(self):
+        if not self.images:
+            messagebox.showinfo("Photos", "Add at least one photo.")
+            return
+        payload = {
+            "images": self.images,  # list of (PIL.Image, src)
+            "category": (self.category_var.get() or "other").strip().lower(),
+            "title": self.title_var.get().strip(),
+            "notes": self.notes.get("1.0", "end").strip()
+        }
+        self.stop_cam()
+        self.withdraw()
+        ReviewDialog(self, payload, on_done=self._done)
+
+    def _done(self, saved_id=None):
+        # close both on finish
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+
+class ReviewDialog(tk.Toplevel):
+    """
+    Step 2: review thumbnails, optional enrichment, Save to library.
+    """
+    def __init__(self, master, payload, on_done=None):
+        super().__init__(master)
+        self.title("Review & Save")
+        self.configure(bg=COLORS.get('bg_panel', '#111827'))
+        self.payload = payload
+        self.on_done = on_done
+
+        # Thumbs
+        tk.Label(self, text="Images", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).pack(anchor='w', padx=12, pady=(12,4))
+        preview = tk.Frame(self, bg=COLORS['bg_panel'])
+        preview.pack(fill='x', padx=12)
+        for idx, (im, src) in enumerate(payload["images"]):
+            th = im.copy(); th.thumbnail((220,220))
+            tkimg = ImageTk.PhotoImage(th)
+            lbl = tk.Label(preview, image=tkimg, bg=COLORS['bg_panel'])
+            lbl.image = tkimg
+            lbl.grid(row=0, column=idx, padx=4, pady=4)
+
+        # Details (editable)
+        frm = tk.Frame(self, bg=COLORS['bg_panel'])
+        frm.pack(fill='x', padx=12, pady=10)
+        for i in range(2):
+            frm.grid_columnconfigure(i, weight=1)
+
+        tk.Label(frm, text="Category", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(row=0, column=0, sticky='w')
+        self.category_var = tk.StringVar(value=payload.get("category","other"))
+        self.category = ttk.Combobox(frm, values=["minerals","fossils","shells","coins","vinyl","zoological","other"], textvariable=self.category_var, state="readonly")
+        self.category.grid(row=1, column=0, sticky='ew', pady=(0,8))
+
+        tk.Label(frm, text="Title", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(row=0, column=1, sticky='w')
+        self.title_var = tk.StringVar(value=payload.get("title",""))
+        tk.Entry(frm, textvariable=self.title_var).grid(row=1, column=1, sticky='ew', pady=(0,8))
+
+        tk.Label(frm, text="Notes", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(row=2, column=0, columnspan=2, sticky='w')
+        self.notes = tk.Text(frm, height=4)
+        self.notes.grid(row=3, column=0, columnspan=2, sticky='ew')
+        self.notes.insert("1.0", payload.get("notes",""))
+
+        # Optional enrichment output
+        tk.Label(self, text="Enrichment (optional)", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).pack(anchor='w', padx=12, pady=(10,4))
+        enr = tk.Frame(self, bg=COLORS['bg_panel'])
+        enr.pack(fill='x', padx=12)
+        tk.Button(enr, text="Suggest Identification", command=self.suggest_ident).pack(side='left')
+        tk.Button(enr, text="Suggest Traits", command=self.suggest_traits).pack(side='left', padx=6)
+        self.ai_out = tk.Text(self, height=6)
+        self.ai_out.pack(fill='x', padx=12, pady=6)
+
+        # Actions
+        act = tk.Frame(self, bg=COLORS['bg_panel'])
+        act.pack(fill='x', padx=12, pady=10)
+        tk.Button(act, text="← Back", command=self._back).pack(side='left')
+        tk.Button(act, text="Save to Library", command=self.save).pack(side='right')
+
+    def _back(self):
+        self.destroy()
+        self.master.deiconify()
+
+    def _first_image_path(self):
+        # ensure we have a temp path for vision helpers
+        im, src = self.payload["images"][0]
+        if src != "<camera>" and os.path.exists(src):
+            return src
+        tmp = os.path.join(tempfile.gettempdir(), f"upload_{int(time.time())}.jpg")
+        im.save(tmp, "JPEG", quality=90)
+        return tmp
+
+    def suggest_ident(self):
+        self.ai_out.delete("1.0", "end")
+        self.ai_out.insert("end", "Identifying…\n")
+        try:
+            p = self._first_image_path()
+            cat = (self.category_var.get() or "other").lower()
+            # Use your existing classifier stub (returns {'openai': {'guesses': [...]}})
+            res = run_classifier(p, cat)
+            guesses = (res.get('openai') or {}).get('guesses') or []
+            # show top 3 with rationales if present
+            for g in guesses[:3]:
+                lbl = g.get('label','').strip()
+                conf = g.get('confidence', '')
+                why = g.get('why','') or g.get('explanation','')
+                self.ai_out.insert("end", f"• {lbl}  ({conf})\n")
+                if why:
+                    self.ai_out.insert("end", f"   – {why}\n")
+            if not guesses:
+                self.ai_out.insert("end", "No suggestions.\n")
+        except Exception as e:
+            self.ai_out.insert("end", f"Failed: {e}\n")
+
+    def suggest_traits(self):
+        self.ai_out.insert("end", "Suggesting traits…\n")
+        # Placeholder hook; you can wire this to your existing enrich_* by category.
+        # Keeping text-only so it’s safe if OpenAI client is not configured.
+        cat = (self.category_var.get() or "other").lower()
+        tips = {
+            "minerals": "Typical fields: hardness, luster, cleavage, streak.",
+            "fossils": "Typical fields: period, fossil type (ammonite/trilobite/shark tooth), preservation.",
+            "shells": "Typical fields: group (whelk/cone/cowrie), patterning, aperture/lip, spire.",
+            "zoological": "Typical fields: element (tooth/bone/antler/feather/insect), family/order hints.",
+            "coins": "Year, mint marks, composition; avoid grading unless confident.",
+            "vinyl": "Artist, title, label, year, RPM/size, catalog no."
+        }.get(cat, "Add whatever is true and useful without guessing.")
+        self.ai_out.insert("end", f"{tips}\n")
+
+    def save(self):
+        cat = (self.category_var.get() or "other").lower()
+        title = self.title_var.get().strip() or "Untitled artifact"
+        notes = self.notes.get("1.0","end").strip()
+
+        # Ensure photo dir
+        os.makedirs(PHOTO_DIR, exist_ok=True)
+
+        # Insert into DB
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT, category TEXT, notes TEXT,
+                created_at TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS photos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id INTEGER, slot INTEGER, path TEXT,
+                FOREIGN KEY(item_id) REFERENCES items(id)
+            )
+        """)
+        cur.execute("INSERT INTO items(title, category, notes, created_at) VALUES (?,?,?,?)",
+                    (title, cat, notes, datetime.utcnow().isoformat()))
+        item_id = cur.lastrowid
+
+        # Save up to 4 images as cover-first
+        max_slots = PHOTO_SLOTS.get(cat, 4)
+        for slot, (im, src) in enumerate(self.payload["images"][:max_slots], start=1):
+            out_dir = os.path.join(PHOTO_DIR, f"{item_id:06d}")
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f"{slot}.jpg")
+            im.save(out_path, "JPEG", quality=90)
+            cur.execute("INSERT INTO photos(item_id, slot, path) VALUES (?,?,?)",
+                        (item_id, slot, out_path))
+
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Saved", f"Saved item #{item_id}")
+        if self.on_done: self.on_done(saved_id=item_id)
+        try: self.destroy()
+        except Exception: pass
+
+
+# ===================== Front Hub & Carousel =====================
+
+def _get_recent_photo_cards(limit=12):
+    """
+    Returns a list of dicts: {'item_id': int|None, 'title': str, 'path': str}
+    If fewer than limit found, supplements with picsum placeholders (item_id=None).
+    """
+    rows = []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT i.id, i.title, p.path
+            FROM items i
+            JOIN photos p ON p.item_id=i.id AND p.slot=1
+            ORDER BY i.id DESC
+            LIMIT ?
+        """, (limit,))
+        for iid, title, path in cur.fetchall():
+            if path and os.path.exists(path):
+                rows.append({"item_id": iid, "title": title or "Artifact", "path": path})
+        conn.close()
+    except Exception:
+        pass
+
+    need = max(0, limit - len(rows))
+    if need:
+        # supplement with web placeholders (download as temp for PIL render)
+        for i in range(need):
+            try:
+                url = f"https://picsum.photos/seed/{random.randint(0,99999)}/800/600"
+                r = requests.get(url, timeout=8)
+                if r.ok:
+                    tmp = os.path.join(tempfile.gettempdir(), f"arti_placeholder_{i}.jpg")
+                    with open(tmp, "wb") as f:
+                        f.write(r.content)
+                    rows.append({"item_id": None, "title": "Inspiration", "path": tmp})
+            except Exception:
+                pass
+    return rows[:limit]
+
+
+def build_front_hub(parent, on_add_item, on_help_ident, on_open_library):
+    """
+    parent: a tk.Frame you provide (e.g., your home panel)
+    Creates a slim top action bar and a bottom carousel of recent photos.
+    """
+    # Top mini menu
+    top = tk.Frame(parent, bg=COLORS['bg_panel'])
+    top.pack(fill='x', pady=(6,4))
+    lbl = tk.Label(top, text="Upload Artifact", fg=COLORS['fg_primary'], bg=COLORS['bg_panel'])
+    lbl.pack(side='left', padx=8)
+    tk.Button(top, text="Add Item", command=on_add_item).pack(side='left')
+    tk.Button(top, text="Help Identify", command=on_help_ident).pack(side='left', padx=6)
+    tk.Button(top, text="Open Library", command=on_open_library).pack(side='right', padx=8)
+
+    # Title for carousel
+    tk.Label(parent, text="Recent from your library", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).pack(anchor='w', padx=8, pady=(8,2))
+
+    # Carousel frame with snap buttons
+    wrap = tk.Frame(parent, bg=COLORS['bg_panel'])
+    wrap.pack(fill='x', padx=6, pady=(0,10))
+    canvas = tk.Canvas(wrap, height=170, bg=COLORS['bg_panel'], highlightthickness=0)
+    canvas.pack(side='left', fill='x', expand=True)
+    hs = ttk.Scrollbar(wrap, orient='horizontal', command=canvas.xview)
+    hs.pack(side='bottom', fill='x')
+    canvas.configure(xscrollcommand=hs.set)
+
+    rail = tk.Frame(canvas, bg=COLORS['bg_panel'])
+    canvas.create_window((0,0), window=rail, anchor='nw')
+
+    # populate
+    cards = _get_recent_photo_cards(limit=12)
+    for i, card in enumerate(cards):
+        frm = tk.Frame(rail, bg=COLORS['bg_panel'], bd=0, highlightthickness=0)
+        frm.grid(row=0, column=i, padx=6, pady=6, sticky='n')
+        try:
+            im = Image.open(card["path"]).convert("RGB")
+            im.thumbnail((220,150))
+            tkimg = ImageTk.PhotoImage(im)
+            lbl = tk.Label(frm, image=tkimg, bg=COLORS['bg_panel'], cursor="hand2")
+            lbl.image = tkimg
+            lbl.pack()
+            title = (card["title"] or "Artifact")[:40]
+            tk.Label(frm, text=title, fg=COLORS['fg_muted'], bg=COLORS['bg_panel']).pack()
+            if card["item_id"]:
+                lbl.bind("<Button-1>", lambda e, iid=card["item_id"]: _open_item_page(iid))
+        except Exception:
+            tk.Label(frm, text="(image)", fg=COLORS['fg_muted'], bg=COLORS['bg_panel']).pack()
+
+    # resize rail width & scrolling region
+    rail.update_idletasks()
+    bbox = canvas.bbox("all")
+    if bbox:
+        canvas.configure(scrollregion=bbox, width=min(bbox[2], parent.winfo_width()))
+
+
+def _open_item_page(item_id: int):
+    # Stub: replace with your actual “open item details” function/window
+    messagebox.showinfo("Item", f"Open item page #{item_id}")
+
+
 # ---------- Detail Window ----------
 
 
@@ -4473,5 +4919,27 @@ class ClassifierApp:
 if __name__ == '__main__':
     root = tk.Tk()
     root.configure(bg=COLORS['bg_app'])
-    app = ClassifierApp(root)
+
+    home_panel = tk.Frame(root, bg=COLORS['bg_panel'])
+    home_panel.pack(fill='both', expand=True)
+
+    def _open_upload():
+        UploadDialog(root, on_continue=None)  # ReviewDialog will be chained inside
+
+    def _help_ident():
+        # If you have an existing image lookup window, call it here:
+        # e.g., self.open_image_lookup()
+        messagebox.showinfo("Identify", "Hook this to your image lookup page.")
+
+    def _open_library():
+        # Hook to your library browser, or stub for now
+        messagebox.showinfo("Library", "Hook this to your library page.")
+
+    build_front_hub(
+        home_panel,
+        on_add_item=_open_upload,
+        on_help_ident=_help_ident,
+        on_open_library=_open_library
+    )
+
     root.mainloop()
