@@ -3347,15 +3347,9 @@ class UploadDialog(tk.Toplevel):
         # Camera capture
         tk.Label(right, text="Camera",
                  fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).pack(anchor='w')
-        self.cam_canvas = tk.Label(right, bg=COLORS['bg_panel'])
-        self.cam_canvas.pack(fill='x', pady=(4, 6))
-        btns = tk.Frame(right, bg=COLORS['bg_panel'])
-        btns.pack(anchor='w')
-        tk.Button(btns, text="Start Camera",
-                  command=self.start_cam).pack(side='left')
-        tk.Button(btns, text="Snap", command=self.snap_photo).pack(
-            side='left', padx=6)
-        tk.Button(btns, text="Stop", command=self.stop_cam).pack(side='left')
+        tk.Button(right, text="Capture from camera...",
+                  command=self._capture_from_ident_camera).pack(
+                      anchor='w', pady=(4, 10))
 
         # --- Details ---
         tk.Label(frm, text="Details", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(
@@ -3391,9 +3385,6 @@ class UploadDialog(tk.Toplevel):
         tk.Button(act, text="Cancel", command=self.destroy).pack(side='left')
         tk.Button(act, text="Review →",
                   command=self.go_review).pack(side='right')
-
-        self._cam_running = False
-        self._tk_cam_img = None
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -3437,57 +3428,41 @@ class UploadDialog(tk.Toplevel):
             self.render_preview()
         except Exception:
             pass
-
+    
     # ---- Camera ----
-    def start_cam(self):
-        try:
-            self.cap = cv2.VideoCapture(0)
-            if not self.cap or not self.cap.isOpened():
-                messagebox.showerror("Camera", "Cannot open camera.")
-                return
-            self._cam_running = True
-            self.after(10, self._cam_loop)
-        except Exception as e:
-            messagebox.showerror("Camera", f"Camera error: {e}")
-
-    def _cam_loop(self):
-        if not self._cam_running or not self.cap:
+    def _capture_from_ident_camera(self):
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW) if sys.platform.startswith("win") else cv2.VideoCapture(0)
+        if not cap or not cap.isOpened():
+            messagebox.showerror("Camera", "Cannot open camera.")
             return
-        ok, frame = self.cap.read()
-        if ok:
-            # shrink for preview
-            h, w = frame.shape[:2]
-            scale = 480 / max(h, w)
-            if scale < 1.0:
-                frame = cv2.resize(frame, (int(w*scale), int(h*scale)))
+        cv2.namedWindow('Press SPACE to capture', cv2.WINDOW_NORMAL)
+        frame = None
+        while True:
+            ok, img = cap.read()
+            if not ok:
+                break
+            cv2.imshow('Press SPACE to capture', img)
+            key = cv2.waitKey(1)
+            if key == 32:  # SPACE
+                frame = img.copy()
+                break
+            elif key == 27:  # ESC
+                break
+        cap.release()
+        cv2.destroyAllWindows()
+        if frame is not None and len(self.images) < self.MAX_IMAGES:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(rgb)
-            tkimg = ImageTk.PhotoImage(img)
-            self.cam_canvas.configure(image=tkimg)
-            self.cam_canvas.image = tkimg
-        self.after(33, self._cam_loop)
-
-    def snap_photo(self):
-        if not self.cap or not self._cam_running:
-            return
-        ok, frame = self.cap.read()
-        if not ok:
-            return
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        im = Image.fromarray(rgb)
-        if len(self.images) < self.MAX_IMAGES:
-            self.images.append((im, "<camera>"))
+            pil_img = Image.fromarray(rgb)
+            self.images.append((pil_img, "<camera>"))
             self.render_preview()
 
     def stop_cam(self):
-        self._cam_running = False
         if self.cap:
             try:
                 self.cap.release()
             except Exception:
                 pass
         self.cap = None
-        self.cam_canvas.configure(image="")
 
     def go_review(self):
         if not self.images:
