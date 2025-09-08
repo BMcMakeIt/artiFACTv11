@@ -44,6 +44,29 @@ def run_classifier(image_path: str, category: str) -> dict:
     return {"openai": {"guesses": []}}
 
 
+def place_window(win, w_ratio=0.5, h_ratio=0.5, anchor="center"):
+    """
+    Size a Tk/Toplevel to a fraction of the screen and position it.
+    anchor: "center" | "left" | "right" | "top" | "bottom"
+    """
+    win.update_idletasks()  # ensure screen dims are current
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    w, h = int(sw * w_ratio), int(sh * h_ratio)
+
+    # default center
+    x, y = (sw - w) // 2, (sh - h) // 2
+    if anchor == "left":
+        x, y = 0, (sh - h) // 2
+    if anchor == "right":
+        x, y = sw - w, (sh - h) // 2
+    if anchor == "top":
+        x, y = (sw - w) // 2, 0
+    if anchor == "bottom":
+        x, y = (sw - w) // 2, sh - h
+
+    win.geometry(f"{w}x{h}+{x}+{y}")
+
+
 CASE_TERMS_RE = re.compile(
     r"\b("
     r"display\s*case|shadow\s*box|shadowbox|"
@@ -5095,6 +5118,17 @@ class ClassifierApp:
 # ---------- App entry ----------
 if __name__ == '__main__':
     root = tk.Tk()
+    # make sure we're not starting maximized/fullscreen
+    root.attributes("-fullscreen", False)
+    try:
+        root.state("normal")           # Windows/Linux
+        root.attributes("-zoomed", False)  # some Windows builds
+    except Exception:
+        pass
+
+    place_window(root, w_ratio=0.5, h_ratio=0.5, anchor="center")
+    root.minsize(900, 600)
+
     root.configure(bg=COLORS['bg_app'])
 
     home_panel = tk.Frame(root, bg=COLORS['bg_panel'])
