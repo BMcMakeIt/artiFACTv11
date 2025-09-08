@@ -3311,7 +3311,7 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
 class UploadDialog(tk.Toplevel):
     """
     Step 1: pick/capture images, basic details.
-    Hands off to ReviewDialog via a simple dict payload.
+    Opens ItemDetailWindow for review & save.
     """
     MAX_IMAGES = 4
 
@@ -3461,196 +3461,39 @@ class UploadDialog(tk.Toplevel):
         self.cap = None
 
     def go_review(self):
+        """Open the Review & Save window for the first selected image."""
         if not self.images:
-            messagebox.showinfo("Photos", "Add at least one photo.")
+            messagebox.showwarning("Missing photo", "Choose at least one image before review.")
             return
-        payload = {
-            "images": self.images,  # list of (PIL.Image, src)
-            "category": (self.category_var.get() or "other").strip().lower(),
-            "title": self.title_var.get().strip(),
-            "notes": self.notes.get("1.0", "end").strip()
-        }
-        self.stop_cam()
-        self.withdraw()
-        ReviewDialog(self, payload, on_done=self._done)
 
-    def _done(self, saved_id=None):
-        # close both on finish
-        try:
-            self.destroy()
-        except Exception:
-            pass
-
-
-class ReviewDialog(tk.Toplevel):
-    """
-    Step 2: review thumbnails, optional enrichment, Save to library.
-    """
-
-    def __init__(self, master, payload, on_done=None):
-        super().__init__(master)
-        self.title("Review & Save")
-        self.configure(bg=COLORS.get('bg_panel', '#111827'))
-        self.payload = payload
-        self.on_done = on_done
-
-        # Thumbs
-        tk.Label(self, text="Images", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).pack(
-            anchor='w', padx=12, pady=(12, 4))
-        preview = tk.Frame(self, bg=COLORS['bg_panel'])
-        preview.pack(fill='x', padx=12)
-        for idx, (im, src) in enumerate(payload["images"]):
-            th = im.copy()
-            th.thumbnail((220, 220))
-            tkimg = ImageTk.PhotoImage(th)
-            lbl = tk.Label(preview, image=tkimg, bg=COLORS['bg_panel'])
-            lbl.image = tkimg
-            lbl.grid(row=0, column=idx, padx=4, pady=4)
-
-        # Details (editable)
-        frm = tk.Frame(self, bg=COLORS['bg_panel'])
-        frm.pack(fill='x', padx=12, pady=10)
-        for i in range(2):
-            frm.grid_columnconfigure(i, weight=1)
-
-        tk.Label(frm, text="Category", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(
-            row=0, column=0, sticky='w')
-        self.category_var = tk.StringVar(
-            value=payload.get("category", "other"))
-        self.category = ttk.Combobox(frm, values=["minerals", "fossils", "shells", "coins",
-                                     "vinyl", "zoological", "other"], textvariable=self.category_var, state="readonly")
-        self.category.grid(row=1, column=0, sticky='ew', pady=(0, 8))
-
-        tk.Label(frm, text="Title", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(
-            row=0, column=1, sticky='w')
-        self.title_var = tk.StringVar(value=payload.get("title", ""))
-        tk.Entry(frm, textvariable=self.title_var).grid(
-            row=1, column=1, sticky='ew', pady=(0, 8))
-
-        tk.Label(frm, text="Notes", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(
-            row=2, column=0, columnspan=2, sticky='w')
-        self.notes = tk.Text(frm, height=4)
-        self.notes.grid(row=3, column=0, columnspan=2, sticky='ew')
-        self.notes.insert("1.0", payload.get("notes", ""))
-
-        # Optional enrichment output
-        tk.Label(self, text="Enrichment (optional)", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).pack(
-            anchor='w', padx=12, pady=(10, 4))
-        enr = tk.Frame(self, bg=COLORS['bg_panel'])
-        enr.pack(fill='x', padx=12)
-        tk.Button(enr, text="Suggest Identification",
-                  command=self.suggest_ident).pack(side='left')
-        tk.Button(enr, text="Suggest Traits",
-                  command=self.suggest_traits).pack(side='left', padx=6)
-        self.ai_out = tk.Text(self, height=6)
-        self.ai_out.pack(fill='x', padx=12, pady=6)
-
-        # Actions
-        act = tk.Frame(self, bg=COLORS['bg_panel'])
-        act.pack(fill='x', padx=12, pady=10)
-        tk.Button(act, text="← Back", command=self._back).pack(side='left')
-        tk.Button(act, text="Save to Library",
-                  command=self.save).pack(side='right')
-
-    def _back(self):
-        self.destroy()
-        self.master.deiconify()
-
-    def _first_image_path(self):
-        # ensure we have a temp path for vision helpers
-        im, src = self.payload["images"][0]
+        # Ensure we have a file path for the first image
+        im, src = self.images[0]
         if src != "<camera>" and os.path.exists(src):
-            return src
-        tmp = os.path.join(tempfile.gettempdir(),
-                           f"upload_{int(time.time())}.jpg")
-        im.save(tmp, "JPEG", quality=90)
-        return tmp
+            photo_path = src
+        else:
+            tmp = os.path.join(tempfile.gettempdir(), f"upload_{int(time.time())}.jpg")
+            try:
+                im.save(tmp, "JPEG", quality=90)
+            except Exception:
+                messagebox.showerror("Photo", "Failed to save captured image.")
+                return
+            photo_path = tmp
+            self.tempfiles.append(tmp)
 
-    def suggest_ident(self):
-        self.ai_out.delete("1.0", "end")
-        self.ai_out.insert("end", "Identifying…\n")
-        try:
-            p = self._first_image_path()
-            cat = (self.category_var.get() or "other").lower()
-            # Use your existing classifier stub (returns {'openai': {'guesses': [...]}})
-            res = run_classifier(p, cat)
-            guesses = (res.get('openai') or {}).get('guesses') or []
-            # show top 3 with rationales if present
-            for g in guesses[:3]:
-                lbl = g.get('label', '').strip()
-                conf = g.get('confidence', '')
-                why = g.get('why', '') or g.get('explanation', '')
-                self.ai_out.insert("end", f"• {lbl}  ({conf})\n")
-                if why:
-                    self.ai_out.insert("end", f"   – {why}\n")
-            if not guesses:
-                self.ai_out.insert("end", "No suggestions.\n")
-        except Exception as e:
-            self.ai_out.insert("end", f"Failed: {e}\n")
+        initial_name = (self.title_var.get() or "").strip()
+        category = (self.category_var.get() or "other").strip()
 
-    def suggest_traits(self):
-        self.ai_out.insert("end", "Suggesting traits…\n")
-        # Placeholder hook; you can wire this to your existing enrich_* by category.
-        # Keeping text-only so it’s safe if OpenAI client is not configured.
-        cat = (self.category_var.get() or "other").lower()
-        tips = {
-            "minerals": "Typical fields: hardness, luster, cleavage, streak.",
-            "fossils": "Typical fields: period, fossil type (ammonite/trilobite/shark tooth), preservation.",
-            "shells": "Typical fields: group (whelk/cone/cowrie), patterning, aperture/lip, spire.",
-            "zoological": "Typical fields: element (tooth/bone/antler/feather/insect), family/order hints.",
-            "coins": "Year, mint marks, composition; avoid grading unless confident.",
-            "vinyl": "Artist, title, label, year, RPM/size, catalog no."
-        }.get(cat, "Add whatever is true and useful without guessing.")
-        self.ai_out.insert("end", f"{tips}\n")
+        ItemDetailWindow(
+            self.master,
+            initial_name=initial_name,
+            category=category,
+            photo_path=photo_path,
+            last_classification=None,
+            initial_details=None,
+        )
 
-    def save(self):
-        cat = (self.category_var.get() or "other").lower()
-        title = self.title_var.get().strip() or "Untitled artifact"
-        notes = self.notes.get("1.0", "end").strip()
-
-        # Ensure photo dir
-        os.makedirs(PHOTO_DIR, exist_ok=True)
-
-        # Insert into DB
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT, category TEXT, notes TEXT,
-                created_at TEXT
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS photos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                item_id INTEGER, slot INTEGER, path TEXT,
-                FOREIGN KEY(item_id) REFERENCES items(id)
-            )
-        """)
-        cur.execute("INSERT INTO items(title, category, notes, created_at) VALUES (?,?,?,?)",
-                    (title, cat, notes, datetime.utcnow().isoformat()))
-        item_id = cur.lastrowid
-
-        # Save up to 4 images as cover-first
-        max_slots = PHOTO_SLOTS.get(cat, 4)
-        for slot, (im, src) in enumerate(self.payload["images"][:max_slots], start=1):
-            out_dir = os.path.join(PHOTO_DIR, f"{item_id:06d}")
-            os.makedirs(out_dir, exist_ok=True)
-            out_path = os.path.join(out_dir, f"{slot}.jpg")
-            im.save(out_path, "JPEG", quality=90)
-            cur.execute("INSERT INTO photos(item_id, slot, path) VALUES (?,?,?)",
-                        (item_id, slot, out_path))
-
-        conn.commit()
-        conn.close()
-        messagebox.showinfo("Saved", f"Saved item #{item_id}")
-        if self.on_done:
-            self.on_done(saved_id=item_id)
-        try:
-            self.destroy()
-        except Exception:
-            pass
+        self.stop_cam()
+        self.destroy()
 
 
 # ===================== Front Hub & Carousel =====================
@@ -5107,7 +4950,6 @@ if __name__ == '__main__':
     home_panel.pack(fill='both', expand=True)
 
     def _open_upload():
-        # ReviewDialog will be chained inside
         UploadDialog(root, on_continue=None)
 
     def _help_ident():
