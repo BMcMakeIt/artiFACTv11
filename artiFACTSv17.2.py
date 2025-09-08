@@ -3738,26 +3738,6 @@ def build_front_hub(parent, on_add_item, on_help_ident, on_open_library):
 
     rail = tk.Frame(canvas, bg=COLORS['bg_panel'])
     canvas.create_window((0, 0), window=rail, anchor='nw')
-    # --- auto-scroll state & starter ---
-    _auto = {"dir": 1, "v": 0.0, "t": None, "job": None}
-
-    def _resume_auto(delay_ms=600):
-        # start (or restart) the smooth scroller after a small delay
-        if _auto["job"]:
-            try:
-                canvas.after_cancel(_auto["job"])
-            except Exception:
-                pass
-            _auto["job"] = None
-
-        def _start():
-            _auto["t"] = None
-            _auto["v"] = 0.0
-            _auto["job"] = canvas.after(
-                int(round(1000 / CAROUSEL_SCROLL_FPS)), _auto_scroll)
-
-        canvas.after(delay_ms, _start)
-
     # keep the scrollregion in sync as cards are added
     def _update_region(_=None):
         canvas.configure(scrollregion=canvas.bbox("all"))
@@ -3888,184 +3868,16 @@ def build_front_hub(parent, on_add_item, on_help_ident, on_open_library):
         _update_region()
         if end < len(cards):
             canvas.after(0, lambda: _render_cards(end))
-        else:
-            # finished laying out everything → ensure autoscroll is running
-            _resume_auto(800)
 
     if cards:
         _render_cards(0)
+        canvas.after(800, _resume_auto)  # start auto-scroll once the layout settles
     else:
         tk.Label(
             rail, text="No photos in your library yet.",
             fg=COLORS['fg_muted'], bg=COLORS['bg_panel']
         ).grid(row=0, column=0, padx=12, pady=12, sticky='w')
 
-    # --- Populate cards (show recent slot-1 photos only) ---
-    cards = _get_recent_photo_cards()
-    if not cards:
-        tk.Label(
-            rail,
-            text="No photos in your library yet.",
-            fg=COLORS['fg_muted'],
-            bg=COLORS['bg_panel']
-        ).grid(row=0, column=0, padx=12, pady=12, sticky='w')
-    else:
-        # Optional: render in batches so huge libraries stay snappy
-        CAROUSEL_BATCH_SIZE = 24  # tweak to taste
-
-        def _render_cards(idx=0):
-            end = min(idx + CAROUSEL_BATCH_SIZE, len(cards))
-            for i in range(idx, end):
-                card = cards[i]
-                frm = tk.Frame(
-                    rail, bg=COLORS['bg_panel'], bd=0, highlightthickness=0)
-                frm.grid(row=0, column=i, padx=CAROUSEL_PAD_X,
-                         pady=CAROUSEL_PAD_Y, sticky='n')
-                try:
-                    im = Image.open(card["path"]).convert("RGB")
-                    im.thumbnail((CAROUSEL_CARD_W, CAROUSEL_CARD_H),
-                                 Image.Resampling.LANCZOS)
-                    tkimg = ImageTk.PhotoImage(im)
-                    lbl = tk.Label(frm, image=tkimg,
-                                   bg=COLORS['bg_panel'], cursor="hand2")
-                    lbl.image = tkimg
-                    lbl.pack()
-                    title = (card["title"] or "Artifact")[:60]
-                    tk.Label(
-                        frm, text=title, fg=COLORS['fg_muted'], bg=COLORS['bg_panel']).pack()
-                    if card["item_id"]:
-                        lbl.bind("<Button-1>", lambda e,
-                                 iid=card["item_id"]: _open_item_page(iid))
-                except Exception:
-                    tk.Label(frm, text="(image)",
-                             fg=COLORS['fg_muted'], bg=COLORS['bg_panel']).pack()
-
-            _update_region()
-            if end < len(cards):
-                canvas.after(0, lambda: _render_cards(end))
-
-        if cards:
-            _render_cards(0)
-        else:
-            tk.Label(
-                rail, text="No photos in your library yet.",
-                fg=COLORS['fg_muted'], bg=COLORS['bg_panel']
-            ).grid(row=0, column=0, padx=12, pady=12, sticky='w')
-
-# Click-drag panning
-    def _scan_mark(e): canvas.scan_mark(e.x, e.y)
-    def _scan_drag(e): canvas.scan_dragto(e.x, e.y, gain=1)
-    canvas.bind("<ButtonPress-1>", _scan_mark)
-    canvas.bind("<B1-Motion>", _scan_drag)
-
-# --- Auto-scroll logic (pauses on hover/drag/wheel) ---
-    _auto = {"job": None, "dir": 1}   # 1 = right, -1 = left
-
-    def _pause_auto(*_):
-        if _auto["job"] is not None:
-            canvas.after_cancel(_auto["job"])
-            _auto["job"] = None
-
-    def _resume_auto(delay_ms=600):
-        if _auto["job"] is None:
-            _auto["job"] = canvas.after(delay_ms, _auto_scroll)
-
-    # requires: import time
-# uses: CAROUSEL_SCROLL_FPS, CAROUSEL_SCROLL_SPEED_PX, CAROUSEL_SCROLL_EASE
-    # requires: import time (you already have it)
-    def _auto_scroll():
-        # ensure keys exist even if something reloaded
-        _auto.setdefault("dir", 1)
-        _auto.setdefault("v", 0.0)
-        _auto.setdefault("t", None)
-
-        now = time.perf_counter()
-        last = _auto["t"] or now
-        dt = max(0.0, now - last)
-        _auto["t"] = now
-
-        bbox = canvas.bbox("all")
-        if not bbox:
-            # nothing to scroll yet; try again next tick
-            _auto["job"] = canvas.after(
-                int(round(1000 / CAROUSEL_SCROLL_FPS)), _auto_scroll)
-            return
-
-        content_w = max(1, bbox[2] - bbox[0])
-        first, lastv = canvas.xview()
-        view_frac = lastv - first
-
-    # ease velocity toward target speed
-        target_v = _auto["dir"] * CAROUSEL_SCROLL_SPEED_PX   # px/sec
-        _auto["v"] += (target_v - _auto["v"]) * CAROUSEL_SCROLL_EASE
-
-    # convert px/sec to canvas fraction per tick
-        new_first = first + (_auto["v"] * dt) / content_w
-
-    # bounce at edges
-        if new_first <= 0.0:
-            new_first = 0.0
-            _auto["dir"] = 1
-            _auto["v"] = 0.0
-        elif new_first >= 1.0 - view_frac:
-            new_first = 1.0 - view_frac
-            _auto["dir"] = -1
-            _auto["v"] = 0.0
-
-        canvas.xview_moveto(new_first)
-        _auto["job"] = canvas.after(
-            int(round(1000 / CAROUSEL_SCROLL_FPS)), _auto_scroll)
-
-    # ease velocity toward target speed
-        target_v = _auto["dir"] * CAROUSEL_SCROLL_SPEED_PX   # px/sec
-        _auto["v"] += (target_v - _auto["v"]) * CAROUSEL_SCROLL_EASE
-
-    # px -> fractional scroll
-        new_first = first + (_auto["v"] * dt) / content_w
-
-    # bounce at edges
-        if new_first <= 0.0:
-            new_first = 0.0
-            _auto["dir"] = 1
-            _auto["v"] = 0.0
-        elif new_first >= 1.0 - view_frac:
-            new_first = 1.0 - view_frac
-            _auto["dir"] = -1
-            _auto["v"] = 0.0
-
-        canvas.xview_moveto(new_first)
-        _auto["job"] = canvas.after(
-            int(round(1000 / CAROUSEL_SCROLL_FPS)), _auto_scroll)
-
-# Mouse wheel scroll that also pauses auto-scroll
-
-    def _wheel(units):
-        _pause_auto()
-        canvas.xview_scroll(units, "units")
-        _resume_auto()
-
-    if sys.platform.startswith("win"):
-        canvas.bind("<MouseWheel>", lambda e: _wheel(int(-e.delta/120)*3))
-    elif sys.platform == "darwin":
-        canvas.bind("<MouseWheel>", lambda e: _wheel(int(-e.delta)))
-    else:
-        canvas.bind("<Button-4>", lambda e: _wheel(-3))  # Linux
-        canvas.bind("<Button-5>", lambda e: _wheel(3))
-
-# Pause/resume on enter/leave & drag
-    canvas.bind("<Enter>", _pause_auto)
-    canvas.bind("<Leave>", lambda e: _resume_auto(600))
-    canvas.bind("<ButtonPress-1>", _pause_auto)
-    canvas.bind("<ButtonRelease-1>", lambda e: _resume_auto(800))
-
-# Keep the scroll region in sync and kick off auto-scroll
-    def _update_region(_=None):
-        canvas.configure(scrollregion=canvas.bbox("all"))
-        bbox = canvas.bbox("all")
-        if bbox:
-            content_w = bbox[2] - bbox[0]
-            if content_w > canvas.winfo_width() and _auto.get("job") is None:
-                _resume_auto(400)
 
 
 def _open_item_page(item_id: int):
