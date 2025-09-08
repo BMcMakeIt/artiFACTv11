@@ -1032,11 +1032,14 @@ def choose_discogs_release(results: list) -> int:
     root = _tk._default_root or _tk.Tk()
     win = _tk.Toplevel(root)
     win.title("Choose release")
-    win.configure(bg=COLORS.get('bg_panel', '#111827'))
-    _tk.Label(win, text="Select the correct release:", bg=COLORS.get('bg_panel', '#111827'),
-              fg=COLORS.get('fg_primary', '#e5e7eb')).pack(padx=10, pady=8, anchor='w')
-    lb = _tk.Listbox(win)
-    lb.pack(fill='both', expand=True, padx=10, pady=6)
+    win.configure(bg=COLORS['bg_app'])
+
+    frame = SlateFrame(win)
+    frame.pack(fill='both', expand=True, padx=10, pady=10)
+
+    SlateLabel(frame, text="Select the correct release:").pack(anchor='w', pady=(0, 6))
+    lb = SlateListbox(frame)
+    lb.pack(fill='both', expand=True, pady=(0, 6))
     for _, desc in rows:
         lb.insert(_tk.END, desc)
     choice = {"rid": 0}
@@ -1050,10 +1053,11 @@ def choose_discogs_release(results: list) -> int:
     def _cancel():
         choice["rid"] = 0
         win.destroy()
-    btns = _tk.Frame(win, bg=COLORS.get('bg_panel', '#111827'))
-    btns.pack(fill='x', padx=10, pady=8)
-    _tk.Button(btns, text="OK", command=_ok).pack(side='left')
-    _tk.Button(btns, text="Cancel", command=_cancel).pack(side='left', padx=6)
+
+    btns = SlateFrame(frame)
+    btns.pack(fill='x', pady=(6, 0))
+    SlateButton(btns, text="OK", command=_ok).pack(side='left')
+    SlateButton(btns, text="Cancel", command=_cancel).pack(side='left', padx=6)
     win.transient(root)
     win.grab_set()
     root.wait_window(win)
@@ -2363,10 +2367,22 @@ class ScrollFrame(SlateFrame):
     def _on_mousewheel_linux(self, event):
         self.canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
 
+
+class BannerMixin:
+    def add_banner(self, container, height=64):
+        frame = SlateFrame(container)
+        frame.pack(fill=tk.X, padx=12, pady=(12, 6))
+        canvas = tk.Canvas(frame, height=height,
+                           bg=COLORS['bg_panel'], highlightthickness=0)
+        canvas.pack(fill=tk.X)
+        canvas.bind('<Configure>', lambda e: draw_banner(canvas, e.width, e.height))
+        return canvas
+
+
 # ---------- Library Window ----------
 
 
-class LibraryWindow(tk.Toplevel):
+class LibraryWindow(tk.Toplevel, BannerMixin):
     def __init__(self, master):
         super().__init__(master)
         self.title("artiFACTS Library")
@@ -2376,13 +2392,7 @@ class LibraryWindow(tk.Toplevel):
         except tk.TclError:
             self.attributes('-zoomed', True)
 
-        banner_frame = SlateFrame(self)
-        banner_frame.pack(fill=tk.X, padx=12, pady=(12, 6))
-        self.banner = tk.Canvas(banner_frame, height=64,
-                                bg=COLORS['bg_panel'], highlightthickness=0)
-        self.banner.pack(fill=tk.X)
-        self.banner.bind('<Configure>', lambda e: draw_banner(
-            self.banner, e.width, e.height))
+        self.banner = self.add_banner(self)
 
         main = SlateFrame(self)
         main.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
@@ -2692,16 +2702,15 @@ class LibraryWindow(tk.Toplevel):
             frame.pack(padx=10, pady=10)
 
             # --- simple expert silhouette ---
-            expert = tk.Canvas(frame, width=60, height=60,
-                               bg=frame.cget('bg'), highlightthickness=0)
+            expert = SlateCanvas(frame, width=60, height=60)
             expert.pack(side='left', padx=(0, 10))
             fg = COLORS['blurb_fg']
             expert.create_oval(15, 0, 45, 30, fill=fg, outline=fg)
             expert.create_rectangle(18, 30, 42, 58, fill=fg, outline=fg)
 
             # --- speech bubble with text ---
-            bubble = tk.Canvas(frame, bg=frame.cget('bg'),
-                               highlightthickness=0, borderwidth=0)
+            bubble = SlateCanvas(frame, highlightthickness=0, borderwidth=0)
+            bubble.configure(bg=frame.cget('bg'))
             bubble.pack(side='left')
 
             pad = 10
@@ -3308,7 +3317,7 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
 
 # ===================== Upload & Review Dialogs =====================
 
-class UploadDialog(tk.Toplevel):
+class UploadDialog(tk.Toplevel, BannerMixin):
     """
     Step 1: pick/capture images, basic details.
     Opens ItemDetailWindow for review & save.
@@ -3318,49 +3327,50 @@ class UploadDialog(tk.Toplevel):
     def __init__(self, master, on_continue):
         super().__init__(master)
         self.title("Upload Artifact")
-        self.configure(bg=COLORS.get('bg_panel', '#111827'))
+        self.configure(bg=COLORS['bg_app'])
+        place_window(self, 0.5, 0.5)
         self.on_continue = on_continue
         self.images = []   # list of (PIL.Image, temp_path) for later save
         self.tempfiles = []
         self.cap = None    # OpenCV camera handle
 
+        self.banner = self.add_banner(self)
+        main = SlateFrame(self)
+        main.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+
         # --- Top: image pick / capture ---
-        frm = tk.Frame(self, bg=COLORS['bg_panel'])
-        frm.pack(fill='both', expand=True, padx=12, pady=12)
+        scroll = ScrollFrame(main)
+        scroll.pack(fill=tk.BOTH, expand=True)
+        inner = scroll.inner
 
-        left = tk.Frame(frm, bg=COLORS['bg_panel'])
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        right = tk.Frame(frm, bg=COLORS['bg_panel'])
-        right.grid(row=0, column=1, sticky="nsew")
-
+        frm = SlateFrame(inner)
+        frm.pack(fill=tk.BOTH, expand=True)
         for i in range(2):
             frm.grid_columnconfigure(i, weight=1)
 
-        # File picker
-        tk.Label(left, text="Upload photos (1–4)",
-                 fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).pack(anchor='w')
-        tk.Button(left, text="Choose images...", command=self.pick_files).pack(
+        left = SlateFrame(frm)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        right = SlateFrame(frm)
+        right.grid(row=0, column=1, sticky="nsew")
+
+        SlateTitle(left, text="Upload photos (1–4)").pack(anchor='w')
+        SlateButton(left, text="Choose images...", command=self.pick_files).pack(
             anchor='w', pady=(4, 10))
-        self.preview = tk.Frame(left, bg=COLORS['bg_panel'])
+        self.preview = SlateFrame(left)
         self.preview.pack(fill='x')
 
-        # Camera capture
-        tk.Label(right, text="Camera",
-                 fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).pack(anchor='w')
-        tk.Button(right, text="Capture from camera...",
-                  command=self._capture_from_ident_camera).pack(
-                      anchor='w', pady=(4, 10))
+        SlateTitle(right, text="Camera").pack(anchor='w')
+        SlateButton(right, text="Capture from camera...",
+                    command=self._capture_from_ident_camera).pack(
+                        anchor='w', pady=(4, 10))
 
-        # --- Details ---
-        tk.Label(frm, text="Details", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(
-            row=1, column=0, columnspan=2, sticky='w', pady=(12, 4))
-        det = tk.Frame(frm, bg=COLORS['bg_panel'])
-        det.grid(row=2, column=0, columnspan=2, sticky='ew')
+        SlateTitle(inner, text="Details").pack(anchor='w', pady=(12, 4))
+        det = SlateFrame(inner)
+        det.pack(fill=tk.X)
         for i in range(2):
             det.grid_columnconfigure(i, weight=1)
 
-        tk.Label(det, text="Category", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(
-            row=0, column=0, sticky='w')
+        SlateLabel(det, text="Category").grid(row=0, column=0, sticky='w')
         self.category_var = tk.StringVar(value="mineral")
         cats = ["mineral", "fossil", "shell",
                 "coin", "vinyl", "zoological", "other"]
@@ -3368,18 +3378,17 @@ class UploadDialog(tk.Toplevel):
             det, values=cats, textvariable=self.category_var, state="readonly")
         self.category.grid(row=1, column=0, sticky='ew', pady=(0, 8))
 
-        tk.Label(det, text="Title", fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).grid(
-            row=0, column=1, sticky='w')
+        SlateLabel(det, text="Title").grid(row=0, column=1, sticky='w')
         self.title_var = tk.StringVar()
         tk.Entry(det, textvariable=self.title_var).grid(
             row=1, column=1, sticky='ew', pady=(0, 8))
 
         # --- Actions ---
-        act = tk.Frame(self, bg=COLORS['bg_panel'])
-        act.pack(fill='x', pady=(10, 6))
-        tk.Button(act, text="Cancel", command=self.destroy).pack(side='left')
-        tk.Button(act, text="Review →",
-                  command=self.go_review).pack(side='right')
+        act = SlateFrame(main)
+        act.pack(fill='x', pady=(10, 0))
+        SlateButton(act, text="Cancel", command=self.destroy).pack(side='left')
+        SlateButton(act, text="Review →",
+                    command=self.go_review).pack(side='right')
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -3410,11 +3419,11 @@ class UploadDialog(tk.Toplevel):
             thumb = im.copy()
             thumb.thumbnail((140, 140))
             tkimg = ImageTk.PhotoImage(thumb)
-            lbl = tk.Label(self.preview, image=tkimg, bg=COLORS['bg_panel'])
+            lbl = SlateLabel(self.preview, image=tkimg)
             lbl.image = tkimg
             lbl.grid(row=0, column=idx, padx=4, pady=4)
-            rm = tk.Button(self.preview, text="×",
-                           command=partial(self._remove, idx))
+            rm = SlateButton(self.preview, text="×",
+                             command=partial(self._remove, idx))
             rm.grid(row=1, column=idx)
 
     def _remove(self, idx):
@@ -3539,35 +3548,30 @@ def _get_recent_photo_cards(limit=None):
 
 def build_front_hub(parent, on_add_item, on_help_ident, on_open_library):
     """
-    parent: a tk.Frame you provide (e.g., your home panel)
+    parent: a SlateFrame you provide (e.g., your home panel)
     Creates a slim top action bar and a bottom carousel of recent photos.
     """
     # Top mini menu
-    top = tk.Frame(parent, bg=COLORS['bg_panel'])
+    top = SlateFrame(parent)
     top.pack(fill='x', pady=(6, 4))
-    lbl = tk.Label(top, text="Upload Artifact",
-                   fg=COLORS['fg_primary'], bg=COLORS['bg_panel'])
-    lbl.pack(side='left', padx=8)
-    tk.Button(top, text="Add Item", command=on_add_item).pack(side='left')
-    tk.Button(top, text="Help Identify", command=on_help_ident).pack(
+    SlateTitle(top, text="Upload Artifact").pack(side='left', padx=8)
+    SlateButton(top, text="Add Item", command=on_add_item).pack(side='left')
+    SlateButton(top, text="Help Identify", command=on_help_ident).pack(
         side='left', padx=6)
-    tk.Button(top, text="Open Library", command=on_open_library).pack(
+    SlateButton(top, text="Open Library", command=on_open_library).pack(
         side='right', padx=8)
 
     # Title for carousel
-    tk.Label(parent, text="Your Collection",
-             fg=COLORS['fg_primary'], bg=COLORS['bg_panel']).pack(anchor='w', padx=8, pady=(8, 2))
+    SlateTitle(parent, text="Your Collection").pack(anchor='w', padx=8, pady=(8, 2))
 
 
 # --- Carousel frame (larger + auto-scroll) ---
-    wrap = tk.Frame(parent, bg=COLORS['bg_panel'])
+    wrap = SlateFrame(parent)
     wrap.pack(fill='x', padx=6, pady=(0, 10))
 
-    canvas = tk.Canvas(
+    canvas = SlateCanvas(
         wrap,
         height=CAROUSEL_CARD_H + 60,
-        bg=COLORS['bg_panel'],
-        highlightthickness=0
     )
     canvas.pack(side='left', fill='x', expand=True)
 
@@ -3575,7 +3579,7 @@ def build_front_hub(parent, on_add_item, on_help_ident, on_open_library):
     hs.pack(side='bottom', fill='x')
     canvas.configure(xscrollcommand=hs.set)
 
-    rail = tk.Frame(canvas, bg=COLORS['bg_panel'])
+    rail = SlateFrame(canvas)
     canvas.create_window((0, 0), window=rail, anchor='nw')
     # keep the scrollregion in sync as cards are added
 
@@ -3682,8 +3686,7 @@ def build_front_hub(parent, on_add_item, on_help_ident, on_open_library):
         end = min(idx + CAROUSEL_BATCH_SIZE, len(cards))
         for i in range(idx, end):
             card = cards[i]
-            frm = tk.Frame(
-                rail, bg=COLORS['bg_panel'], bd=0, highlightthickness=0)
+            frm = SlateFrame(rail)
             frm.grid(row=0, column=i, padx=CAROUSEL_PAD_X,
                      pady=CAROUSEL_PAD_Y, sticky='n')
             try:
@@ -3691,19 +3694,16 @@ def build_front_hub(parent, on_add_item, on_help_ident, on_open_library):
                 im.thumbnail((CAROUSEL_CARD_W, CAROUSEL_CARD_H),
                              Image.Resampling.LANCZOS)
                 tkimg = ImageTk.PhotoImage(im)
-                lbl = tk.Label(frm, image=tkimg,
-                               bg=COLORS['bg_panel'], cursor="hand2")
+                lbl = SlateLabel(frm, image=tkimg, cursor="hand2")
                 lbl.image = tkimg
                 lbl.pack()
                 title = (card.get("title") or "Artifact")[:60]
-                tk.Label(frm, text=title,
-                         fg=COLORS['fg_muted'], bg=COLORS['bg_panel']).pack()
+                SlateLabel(frm, text=title, fg=COLORS['fg_muted']).pack()
                 if card.get("item_id"):
                     lbl.bind("<Button-1>", lambda e,
                              iid=card["item_id"]: _open_item_page(iid))
             except Exception:
-                tk.Label(frm, text="(image)",
-                         fg=COLORS['fg_muted'], bg=COLORS['bg_panel']).pack()
+                SlateLabel(frm, text="(image)", fg=COLORS['fg_muted']).pack()
 
         _update_region()
         if end < len(cards):
@@ -3714,9 +3714,9 @@ def build_front_hub(parent, on_add_item, on_help_ident, on_open_library):
         # start auto-scroll once the layout settles
         canvas.after(800, _resume_auto)
     else:
-        tk.Label(
+        SlateLabel(
             rail, text="No photos in your library yet.",
-            fg=COLORS['fg_muted'], bg=COLORS['bg_panel']
+            fg=COLORS['fg_muted']
         ).grid(row=0, column=0, padx=12, pady=12, sticky='w')
 
 
@@ -3734,7 +3734,7 @@ def _open_item_page(item_id: int):
 # ---------- Detail Window ----------
 
 
-class ItemDetailWindow(tk.Toplevel):
+class ItemDetailWindow(tk.Toplevel, BannerMixin):
     def __init__(self, master, initial_name: str, category: str, photo_path: str,
                  last_classification=None, item_id: int | None = None,
                  initial_details: dict | None = None, on_save=None):
@@ -3742,6 +3742,7 @@ class ItemDetailWindow(tk.Toplevel):
         self.title("Item details")
         self.configure(bg=COLORS['bg_app'])
         self.minsize(900, 650)
+        place_window(self, 0.5, 0.5)
         self.photo_path = photo_path
         self.last_classification = last_classification
         self.details_entries = {}
@@ -3750,14 +3751,17 @@ class ItemDetailWindow(tk.Toplevel):
         self._on_saved = on_save
         self.category_var = tk.StringVar(value=category)
 
-        # Header
-        header = SlateFrame(self)
-        header.pack(fill=tk.X, padx=12, pady=(12, 0))
+        self.banner = self.add_banner(self)
+        main = SlateFrame(self)
+        main.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+
+        header = SlateFrame(main)
+        header.pack(fill=tk.X)
         SlateTitle(header, text=f"Review & Save Item — {category.capitalize()}").pack(
             anchor='w', pady=(4, 6))
 
-        cat_row = SlateFrame(self)
-        cat_row.pack(fill=tk.X, padx=12, pady=(0, 4))
+        cat_row = SlateFrame(main)
+        cat_row.pack(fill=tk.X, pady=(0, 4))
         SlateLabel(cat_row, text="Category").grid(
             row=0, column=0, sticky='e', padx=(8, 4))
         self.category_combo = ttk.Combobox(
@@ -3766,9 +3770,8 @@ class ItemDetailWindow(tk.Toplevel):
         )
         self.category_combo.grid(row=0, column=1, sticky='w', padx=(0, 12))
 
-        # Photo
-        row_photo = SlateFrame(self)
-        row_photo.pack(fill=tk.X, padx=12, pady=8)
+        row_photo = SlateFrame(main)
+        row_photo.pack(fill=tk.X, pady=8)
         SlateLabel(row_photo, text="Photo").grid(
             row=0, column=0, sticky='ne', padx=(8, 6))
         img_box = SlateFrame(row_photo)
@@ -3777,13 +3780,12 @@ class ItemDetailWindow(tk.Toplevel):
             im = Image.open(photo_path)
             im.thumbnail((300, 300), Image.Resampling.LANCZOS)
             self._tk_img = ImageTk.PhotoImage(im)
-            tk.Label(img_box, image=self._tk_img, bg=COLORS['bg_panel']).pack()
+            SlateLabel(img_box, image=self._tk_img).pack()
         except Exception:
             SlateLabel(img_box, text="(image unavailable)").pack()
 
-        # Scrollable fields
-        scroll = ScrollFrame(self)
-        scroll.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        scroll = ScrollFrame(main)
+        scroll.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         body = scroll.inner
 
         cols = SlateFrame(body)
@@ -3828,9 +3830,8 @@ class ItemDetailWindow(tk.Toplevel):
                 e.delete(0, tk.END)
                 e.insert(0, v)
 
-        # Pinned buttons
-        btns = SlateFrame(self)
-        btns.pack(fill=tk.X, padx=12, pady=(0, 12))
+        btns = SlateFrame(main)
+        btns.pack(fill=tk.X, pady=(0, 0))
         self.collect_btn = SlateButton(
             btns, text="Collect Details", command=self.collect_details)
         self.collect_btn.pack(side='left', padx=6)
@@ -3981,16 +3982,19 @@ class ItemDetailWindow(tk.Toplevel):
 
         win = _tk.Toplevel(self)
         win.title("Scan barcode")
-        win.configure(bg=COLORS['bg_panel'])
+        win.configure(bg=COLORS['bg_app'])
         win.transient(self)
         win.grab_set()
-        preview = _tk.Label(win, bg=COLORS['bg_panel'])
-        preview.pack(padx=10, pady=(10, 6))
-        status = _tk.Label(win, text="Align barcode in the box. Press Capture (or Space).",
-                           bg=COLORS['bg_panel'], fg=COLORS['fg_primary'])
-        status.pack(padx=10, pady=(0, 8))
-        btns = _tk.Frame(win, bg=COLORS['bg_panel'])
-        btns.pack(padx=10, pady=(0, 10))
+
+        frame = SlateFrame(win)
+        frame.pack(padx=10, pady=10)
+
+        preview = SlateLabel(frame)
+        preview.pack(pady=(0, 6))
+        status = SlateLabel(frame, text="Align barcode in the box. Press Capture (or Space).")
+        status.pack(pady=(0, 8))
+        btns = SlateFrame(frame)
+        btns.pack()
         cap_btn = SlateButton(btns, text="Capture")
         cap_btn.pack(side='left', padx=6)
         SlateButton(btns, text="Close", command=win.destroy).pack(
@@ -4241,7 +4245,7 @@ class ItemDetailWindow(tk.Toplevel):
 # ---------- Classifier App (pass-in root) ----------
 
 
-class ClassifierApp:
+class ClassifierApp(BannerMixin):
     def __init__(self, root: tk.Tk):
         self.master = root
         self.master.title('artiFACTS')
@@ -4251,13 +4255,7 @@ class ClassifierApp:
         except tk.TclError:
             self.master.attributes('-zoomed', True)
 
-        banner_frame = SlateFrame(self.master)
-        banner_frame.pack(fill=tk.X, padx=12, pady=(12, 6))
-        self.banner = tk.Canvas(banner_frame, height=96,
-                                bg=COLORS['bg_panel'], highlightthickness=0)
-        self.banner.pack(fill=tk.X)
-        self.banner.bind('<Configure>', lambda e: draw_banner(
-            self.banner, e.width, e.height))
+        self.banner = self.add_banner(self.master, height=96)
 
         main = SlateFrame(self.master)
         main.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
@@ -4948,8 +4946,15 @@ if __name__ == '__main__':
 
     root.configure(bg=COLORS['bg_app'])
 
-    home_panel = tk.Frame(root, bg=COLORS['bg_panel'])
-    home_panel.pack(fill='both', expand=True)
+    banner_frame = SlateFrame(root)
+    banner_frame.pack(fill=tk.X, padx=12, pady=(12, 6))
+    banner = tk.Canvas(banner_frame, height=64,
+                       bg=COLORS['bg_panel'], highlightthickness=0)
+    banner.pack(fill=tk.X)
+    banner.bind('<Configure>', lambda e: draw_banner(banner, e.width, e.height))
+
+    home_panel = SlateFrame(root)
+    home_panel.pack(fill='both', expand=True, padx=12, pady=12)
 
     def _open_upload():
         UploadDialog(root, on_continue=None)
