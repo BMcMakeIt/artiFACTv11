@@ -2651,6 +2651,14 @@ class LibraryWindow(tk.Toplevel, BannerMixin):
             p = detail_map.get(f"img{i}_path")
             paths.append(p if p and os.path.exists(p) else None)
 
+        # Robust fallback when no web slots exist
+        if not any(paths):
+            upload = detail_map.get("upload_path", "")
+            if upload and os.path.exists(upload):
+                paths[0] = upload
+            elif photo_path and os.path.exists(photo_path):
+                paths[0] = photo_path
+
         if (any(p is None for p in paths)
             and item_id is not None
                 and (category or "").lower() != "other"):
@@ -3252,6 +3260,7 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
         return ok
 
     # copy uploaded image for persistence
+    upload_local = ""
     if uploaded and os.path.exists(uploaded):
         up_ext = os.path.splitext(uploaded)[1] or ".jpg"
         up_dest = os.path.join(item_dir, f"upload{up_ext}")
@@ -3259,11 +3268,12 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
             if os.path.abspath(uploaded) != os.path.abspath(up_dest):
                 shutil.copyfile(uploaded, up_dest)
             meta["upload_path"] = up_dest
+            upload_local = up_dest
         except Exception:
             pass
 
-        # promote the local copy to img1, replacing any existing first slot
-        if cat in {"fossil", "shell", "mineral", "zoological", "other"}:
+        # promote the local copy to img1 for scientific categories
+        if cat in {"fossil", "shell", "mineral", "zoological"}:
             dest_first = os.path.join(item_dir, f"img1{up_ext}")
             try:
                 for f in glob.glob(os.path.join(item_dir, "img1.*")):
@@ -3278,6 +3288,23 @@ def populate_photo_slots(item_id: int, category: str, name: str, details: dict, 
                 pass
             # next web save goes to slot 2
             slot = 2
+
+    if cat == "other":
+        if upload_local and os.path.exists(upload_local):
+            up_ext = os.path.splitext(upload_local)[1] or ".jpg"
+            dest_first = os.path.join(item_dir, f"img1{up_ext}")
+            for f in glob.glob(os.path.join(item_dir, "img1.*")):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+            try:
+                shutil.copyfile(upload_local, dest_first)
+                meta["img1_path"] = dest_first
+                meta["img1_src"] = "uploaded"
+            except Exception:
+                pass
+        return meta
 
     q_name = name or ""
 
@@ -4246,6 +4273,10 @@ class ItemDetailWindow(tk.Toplevel, BannerMixin):
                         self._last_meta_result = meta
                 elif cat == "coin":
                     meta = enrich_coin(name_for_prompt, helpers)
+                elif cat == "other":
+                    key_list = SCHEMAS["other"]["api"]
+                    meta = enrich_generic_openai(
+                        name_for_prompt, cat, self.photo_path, helpers, key_list)
                 elif cat == "zoological":
                     # Use two-pass zoological enrichment with the image so the model
                     # can identify the organism (e.g., "death's-head hawkmoth") rather than the container.
